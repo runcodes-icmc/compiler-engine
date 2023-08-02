@@ -1,0 +1,49 @@
+{
+    "provider": {
+        "data": "data_provider",
+        "storage": "storage_provider"
+    },
+
+    "db": {
+        "host": "localhost",
+        "port": 5432,
+        "name": "dbname",
+        "username": "user",
+        "password": "pass"
+    },
+
+    "s3": {
+        "region": "us-west-2",
+        "access_key": "access_key",
+        "secret_key": "secret_key",
+        "commits_bucket": "-commits",
+        "outputfiles_bucket": "-outputfiles",
+        "files_bucket": "-files",
+        "compilation_files_dir": "compilationfiles",
+        "cases_bucket": "-cases"
+    },
+
+    "log": {
+        "file": "compiler.log",
+        "level": "DEBUG"
+    },
+
+    "lock_file": "compiler.lock",
+    "num_workers": 1,
+
+    "min_sleep_time": 1,
+    "max_sleep_time": 15,
+
+    "exec_dir": "/tmp",
+    "src_dir": "src",
+    "output_files_dir": "outputfiles",
+    "max_output_file_size": 1048576,
+    "compilation_error_file": "compilation.err",
+    "compilation_output_file": "compilation.out",
+
+    "compilation_timeout": 10,
+    "base_exec_timeout": 5,
+    "monitor_max_file_size": 5242880,
+    "monitor_max_mem_size": 268435456,
+    "container_cfg_file": "container.config"
+}

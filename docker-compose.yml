@@ -1,0 +1,49 @@
+version: "3.7"
+
+services:
+  # Compiler engine itself
+  rcc:
+    build: .
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./exec:/exec
+    networks:
+      - runcodes-net
+    environment:
+      RUNCODES_COMPILER_EXEC_DIR: /exec
+      RUNCODES_COMPILER_EXEC_DIR_REMOTE: ${PWD}/exec
+
+  # PostgreSQL Database
+  database:
+    image: ghcr.io/runcodes-icmc/database:development
+    restart: unless-stopped
+    environment:
+      - POSTGRES_PASSWORD=secret_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - runcodes-db-vol:/var/lib/postgresql/data
+    networks:
+      - runcodes-net
+
+  ###########
+  # Seaweed #
+  ###########
+
+  seaweed:
+    image: chrislusf/seaweedfs
+    ports:
+      - 8333:8333
+    command: server -s3 -volume.max=50 -dir="/data" -master.volumeSizeLimitMB=256 -ip=seaweed -ip.bind=0.0.0.0
+    volumes:
+      - runcodes-seaweed-vol:/data
+    networks:
+      - runcodes-net
+
+networks:
+  runcodes-net:
+
+volumes:
+  runcodes-db-vol:
+  runcodes-seaweed-vol:
