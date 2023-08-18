@@ -163,7 +163,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
         remote_dir: {"bind": "/root", "mode": "rw"},
     }
     container = client.containers.run(
-        commit.language.image, detach=True, remove=True, volumes=volumes
+        commit.language.image, detach=True, remove=False, volumes=volumes
     )
     
     container_stdout = container.logs(stream=True)
@@ -220,6 +220,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             raise RuntimeError("Compilation timed out")
     try:
         container.wait(timeout=cfg.base_exec_timeout)
+        container.remove()
     except requests.exceptions.ReadTimeout:
         container.kill()
         raise RuntimeError("Container wait timed out")
