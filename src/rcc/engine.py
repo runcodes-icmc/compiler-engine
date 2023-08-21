@@ -48,6 +48,7 @@ def copy_source_files(data_provider, storage_provider, commit, base_dir):
         # Extra tasks if we have a zip (extract, deduce language of files)
         with zipfile.ZipFile(destination) as zip_file:
             commit.extension = rcc.util.deduce_language(zip_file)
+            commit.language = rcc.util.language_from_extension(commit.extension)
             zip_file.extractall(src_dir)
     commit.is_compilable = rcc.util.is_compilable(commit.extension)
 
@@ -156,6 +157,7 @@ async def expect_message(outputs, expected, timeout):
 
 
 async def run(data_provider, commit, test_cases, base_dir, remote_dir):
+    logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
 
     client = docker.from_env()
@@ -197,10 +199,12 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
                 commit.status = Commit.STATUS_COMPILED
                 commit.is_compiled = True
         except asyncio.TimeoutError:
+            logger.warning("Compilation timed out", exc_info=True)
             raise RuntimeError("Compilation timed out")
     else:
         # NOTE: does not make much sense, but seems to be needed
         commit.is_compiled = True
+
     commit.compilation_finished_time = datetime.datetime.now()
     data_provider.update_commit(commit)
 
@@ -217,13 +221,19 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             # Test cases execution done
             await expect_message(container_stdout, "run.done", timeout)
         except asyncio.TimeoutError:
-            raise RuntimeError("Compilation timed out")
+            logger.warning("Execution timed out", exc_info=True)
+            raise RuntimeError("Execution timed out")
     try:
         container.wait(timeout=cfg.base_exec_timeout)
-        container.remove()
     except requests.exceptions.ReadTimeout:
+        logger.error("Container wait timed out", exc_info=True)
         container.kill()
-        raise RuntimeError("Container wait timed out")
+    finally: 
+        # Ensure container is removed
+        try:
+            container.remove(force=True)
+        except Exception:
+            logger.error("Container removal failed", exc_info=True)
 
 
 def run_tests(data_provider, storage_provider, commit, test_cases, base_dir, remote_dir):
