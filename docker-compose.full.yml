@@ -10,7 +10,7 @@ services:
     networks:
       - runcodes-net
     environment:
-      RUNCODES_S3_PUBLIC_ENDPOINT: 127.0.0.1
+      RUNCODES_S3_PUBLIC_ENDPOINT: http://localhost:8333
 
   # Compiler Engine
   rcc:

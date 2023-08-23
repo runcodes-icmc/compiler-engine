@@ -45,6 +45,7 @@ KNOWN_LANGUAGES = [
     Language('Golang', ['go'], image_name='go'),
     Language('Haskell', ['hs', 'lhs']),
     Language('Java', ['java', 'jar', 'class']),
+    Language('Octave', ['m'], False),
     Language('Pascal', ['pas', 'pl', 'pp', 'pascal']),
     Language('Portugol', ['por']),
     Language('Python', ['py', 'py3', 'pyc'], False),

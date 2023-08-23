@@ -7,9 +7,6 @@ from six.moves import urllib
 
 import datetime
 import fcntl
-import json
-import logging
-import math
 import os
 import signal
 import time
