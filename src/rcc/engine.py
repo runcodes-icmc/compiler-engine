@@ -27,6 +27,7 @@ from .languages import language_from_extension
 
 DEFAULT_MKDIR_PERMISSIONS = 0o777
 
+
 def set_extension(commit):
     _, extension = os.path.splitext(commit.fname)
     extension = rcc.util.standardize_extension(extension[1:])
@@ -164,7 +165,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
     container = client.containers.run(
         commit.language.image, detach=True, remove=False, volumes=volumes
     )
-    
+
     container_stdout = container.logs(stream=True)
 
     if commit.is_compilable:
@@ -225,7 +226,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
     except requests.exceptions.ReadTimeout:
         logger.error("Container wait timed out", exc_info=True)
         container.kill()
-    finally: 
+    finally:
         # Ensure container is removed
         try:
             container.remove(force=True)
@@ -233,7 +234,9 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             logger.error("Container removal failed", exc_info=True)
 
 
-def run_tests(data_provider, storage_provider, commit, test_cases, base_dir, remote_dir):
+def run_tests(
+    data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
+):
     loop = asyncio.get_event_loop()
     run_task = run(data_provider, commit, test_cases, base_dir, remote_dir)
     loop.run_until_complete(run_task)
