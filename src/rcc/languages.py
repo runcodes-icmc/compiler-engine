@@ -51,6 +51,7 @@ KNOWN_LANGUAGES = [
     Language("Octave", ["m"], False),
     Language("Pascal", ["pas", "pl", "pp", "pascal"]),
     Language("Portugol", ["por"]),
+    Language("Prolog", ["pl", "pro", "prolog"]),
     Language("Python", ["py", "py3", "pyc"], False),
     Language("R", ["r"], False),
     Language("Rust", ["rs"]),
