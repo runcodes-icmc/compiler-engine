@@ -401,16 +401,32 @@ def process_commit(data_provider, commit):
 def process_commits(data_provider, commit_queue):
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     logger.debug("Worker started")
+
+    # exceptions that stop the worker
+    non_retryable_exceptions = (KeyboardInterrupt, MemoryError, OSError, SystemExit, SystemError)
+
     with rcc.util.UninterruptibleContext():
-        try:
-            while True:
+        while True:
+            try:
                 commit = commit_queue.get()
+
                 if commit is None:
-                    # Hint to stop processing, mark empty task as done and bail
-                    commit_queue.task_done()
+                    # Hint to stop processing, mark empty task as done (in finally block) and bail
                     break
+
                 process_commit(data_provider, commit)
+            
+            # If exception should stop the worker
+            except non_retryable_exceptions as e:
+                logger.warning(f"Caught non-retryable exception: {e}")
+                break
+
+            # If the worker should retry
+            except Exception as e:
+                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+
+            # Marks task as done
+            finally:
                 commit_queue.task_done()
-        except:
-            logger.error("Uncaught exception", exc_info=True)
+
     logger.debug("Worker stopped")
