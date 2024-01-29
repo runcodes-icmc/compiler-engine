@@ -112,11 +112,13 @@ def diff(user_fname, test_fname, output_type, abs_error):
 def process_test_results(storage_provider, commit, test_case, base_dir):
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     user_out_fname = os.path.join(base_dir, "{}.output".format(test_case.id))
+    user_err_fname = os.path.join(base_dir, "{}.error".format(test_case.id))
     run_info_fname = os.path.join(base_dir, "{}.monitor_out".format(test_case.id))
     run_info = configparser.ConfigParser(allow_no_value=True)
     with open(run_info_fname) as run_info_file:
         run_info.read_file(it.chain(("[info]",), run_info_file))
-    if len(run_info["info"]["signal"]) != 0:
+    user_err_stat = os.stat(user_err_fname)
+    if len(run_info["info"]["signal"]) != 0 or user_err_stat.st_size != 0:
         test_status = TestCaseResult.STATUS_INCORRECT
     else:
         test_out_fname = os.path.join(base_dir, "{}.out".format(test_case.id))
@@ -403,7 +405,13 @@ def process_commits(data_provider, commit_queue):
     logger.debug("Worker started")
 
     # exceptions that stop the worker
-    non_retryable_exceptions = (KeyboardInterrupt, MemoryError, OSError, SystemExit, SystemError)
+    non_retryable_exceptions = (
+        KeyboardInterrupt,
+        MemoryError,
+        OSError,
+        SystemExit,
+        SystemError,
+    )
 
     with rcc.util.UninterruptibleContext():
         while True:
@@ -415,7 +423,7 @@ def process_commits(data_provider, commit_queue):
                     break
 
                 process_commit(data_provider, commit)
-            
+
             # If exception should stop the worker
             except non_retryable_exceptions as e:
                 logger.warning(f"Caught non-retryable exception: {e}")

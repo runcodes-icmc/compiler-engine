@@ -42,7 +42,10 @@ class Config:
 class EnvConfig(Config):
     def __init__(self):
         env_configs = {
-            "provider": {"data": "postgres", "storage": "s3", },
+            "provider": {
+                "data": "postgres",
+                "storage": "s3",
+            },
             "db": {
                 "name": os.environ.get("RUNCODES_DB_DATABASE", "runcodes"),
                 "host": os.environ.get("RUNCODES_DB_HOST", "database"),
@@ -56,7 +59,9 @@ class EnvConfig(Config):
                     "RUNCODES_S3_ENDPOINT", "http://seaweed:8333"
                 ),
                 "access_key": os.environ.get("RUNCODES_S3_CREDENTIALS_KEY", "test_key"),
-                "secret_key": os.environ.get("RUNCODES_S3_CREDENTIALS_SECRET", "test_secret"),
+                "secret_key": os.environ.get(
+                    "RUNCODES_S3_CREDENTIALS_SECRET", "test_secret"
+                ),
                 "commits_bucket": f"{os.environ.get('RUNCODES_S3_BUCKET_PREFIX', 'runcodes')}-commits",
                 "outputfiles_bucket": f"{os.environ.get('RUNCODES_S3_BUCKET_PREFIX', 'runcodes')}-outputfiles",
                 "files_bucket": f"{os.environ.get('RUNCODES_S3_BUCKET_PREFIX', 'runcodes')}-files",
@@ -68,14 +73,21 @@ class EnvConfig(Config):
             "min_sleep_time": 1,
             "max_sleep_time": 15,
             "exec_dir": os.environ.get("RUNCODES_COMPILER_EXEC_DIR", "/tmp"),
-            "exec_dir_remote": os.environ.get("RUNCODES_COMPILER_EXEC_DIR_REMOTE", os.environ.get("RUNCODES_COMPILER_EXEC_DIR", "/tmp")),
+            "exec_dir_remote": os.environ.get(
+                "RUNCODES_COMPILER_EXEC_DIR_REMOTE",
+                os.environ.get("RUNCODES_COMPILER_EXEC_DIR", "/tmp"),
+            ),
             "src_dir": "src",
             "output_files_dir": "outputfiles",
             "max_output_file_size": 1048576,
             "compilation_error_file": "compilation.err",
             "compilation_output_file": "compilation.out",
-            "compilation_timeout": 10,
-            "base_exec_timeout": 5,
+            "compilation_timeout": float(
+                os.environ.get("RUNCODES_DEFAULT_COMPILATION_TIMEOUT", "10")
+            ),
+            "base_exec_timeout": float(
+                os.environ.get("RUNCODES_DEFAULT_EXEC_TIMEOUT", "5")
+            ),
             "monitor_max_file_size": 5242880,
             "monitor_max_mem_size": 268435456,
             "container_cfg_file": "container.config",
