@@ -54,7 +54,8 @@ KNOWN_LANGUAGES = [
     Language("Python", ["py", "py3", "pyc"], False),
     Language("R", ["r"], False),
     Language("Rust", ["rs"]),
-    Language("Lua", ["lua", "lol", "lu", "luac"])
+    Language("Lua", ["lua", "lol", "lu", "luac"]),
+    Language("Julia", ["jl", "ijl", "julia"], False),
 ]
 
 # Build lookup table for language extensions
