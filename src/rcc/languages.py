@@ -49,13 +49,18 @@ KNOWN_LANGUAGES = [
     Language("Haskell", ["hs", "lhs"]),
     Language("Java", ["java", "jar", "class"]),
     Language("Octave", ["m"], False),
-    Language("Pascal", ["pas", "pl", "pp", "pascal"]),
+    Language("Pascal", ["pas", "pp", "pascal"]),
     Language("Portugol", ["por"]),
     Language("Python", ["py", "py3", "pyc"], False),
     Language("R", ["r"], False),
     Language("Rust", ["rs"]),
     Language("Lua", ["lua", "lol", "lu", "luac"]),
-    Language("Julia", ["jl"], False)
+    Language("Julia", ["jl"], False),
+    Language("Prolog", ["pl", "pro", "prolog"]),
+    Language("C (OpenMP)", ["omp.c", "omp.h"], image_name="c-omp"),
+    Language("C++ (OpenMP)", ["omp.cpp", "omp.cc", "omp.cxx", "omp.c++", "omp.hpp", "omp.h"], image_name="cpp-omp"),
+    Language("C (OpenMP + MPI)", ["mpi.c", "mpi.h"], image_name="c-omp-mpi"),
+    Language("C++ (OpenMP + MPI)", ["mpi.cpp", "mpi.cc", "mpi.cxx", "mpi.c++", "mpi.hpp", "mpi.h"], image_name="cpp-omp-mpi"),
 ]
 
 # Build lookup table for language extensions
@@ -78,5 +83,13 @@ def language_from_extension(ext_or_filename: str) -> Optional[Language]:
     Returns:
         Optional[Language]: the language associated with the extension, when there is a single match, None otherwise
     """
-    ext = ext_or_filename.split(".")[-1].lower()
+    exts = ext_or_filename.split(".")
+    ext = exts[-1].lower()
+
+    # Handle OpenMP and MPI extensions
+    if ext in ("c", "h", "cpp", "cc", "cxx", "c++", "hpp") and len(exts) == 3:
+        pre_ext = exts[-2].lower()
+        if pre_ext in ("omp", "mpi"):
+            ext = f"{pre_ext}.{ext}"
+
     return _LANGUAGE_EXTENSIONS_MAPPING.get(ext, None)
