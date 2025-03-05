@@ -61,6 +61,7 @@ KNOWN_LANGUAGES = [
     Language("C++ (OpenMP)", ["omp.cpp", "omp.cc", "omp.cxx", "omp.c++", "omp.hpp", "omp.h"], image_name="cpp-omp"),
     Language("C (OpenMP + MPI)", ["mpi.c", "mpi.h"], image_name="c-omp-mpi"),
     Language("C++ (OpenMP + MPI)", ["mpi.cpp", "mpi.cc", "mpi.cxx", "mpi.c++", "mpi.hpp", "mpi.h"], image_name="cpp-omp-mpi"),
+    Language("Verilog", ["v", "vh"], False),
 ]
 
 # Build lookup table for language extensions
