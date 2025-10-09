@@ -1,4 +1,4 @@
-FROM python:3.7-bullseye AS runtime
+FROM python:3.13-trixie AS runtime
 
 
 # System upgrade
@@ -6,7 +6,7 @@ RUN apt-get update -y
 RUN apt-get upgrade -y
 
 # Install dependencies
-RUN apt-get install -y curl iptables libdevmapper1.02.1
+RUN apt-get install -y curl iptables libdevmapper-dev libpq-dev python3-dev
 
 # Clean Up
 RUN apt-get clean
