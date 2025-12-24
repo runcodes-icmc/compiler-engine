@@ -69,7 +69,7 @@ KNOWN_LANGUAGES = [
         image_name="cpp-omp-mpi",
     ),
     Language("Verilog", ["v", "vh"], False),
-    Language("Zig", ["zig"], False),
+    Language("Zig", ["zig"]),
 ]
 
 # Build lookup table for language extensions
