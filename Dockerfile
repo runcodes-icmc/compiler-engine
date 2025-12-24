@@ -1,4 +1,4 @@
-FROM python:3.13-trixie AS runtime
+FROM python:3.14-trixie AS runtime
 
 # Install dependencies
 RUN apt-get update &&\
