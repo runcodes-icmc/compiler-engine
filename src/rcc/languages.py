@@ -1,6 +1,5 @@
 from typing import List, Optional
 
-
 IMAGE_FORMAT = "ghcr.io/runcodes-icmc/compiler-images-%s:latest"
 
 
@@ -58,10 +57,19 @@ KNOWN_LANGUAGES = [
     Language("Julia", ["jl"], False),
     Language("Prolog", ["pl", "pro", "prolog"]),
     Language("C (OpenMP)", ["omp.c", "omp.h"], image_name="c-omp"),
-    Language("C++ (OpenMP)", ["omp.cpp", "omp.cc", "omp.cxx", "omp.c++", "omp.hpp", "omp.h"], image_name="cpp-omp"),
+    Language(
+        "C++ (OpenMP)",
+        ["omp.cpp", "omp.cc", "omp.cxx", "omp.c++", "omp.hpp", "omp.h"],
+        image_name="cpp-omp",
+    ),
     Language("C (OpenMP + MPI)", ["mpi.c", "mpi.h"], image_name="c-omp-mpi"),
-    Language("C++ (OpenMP + MPI)", ["mpi.cpp", "mpi.cc", "mpi.cxx", "mpi.c++", "mpi.hpp", "mpi.h"], image_name="cpp-omp-mpi"),
+    Language(
+        "C++ (OpenMP + MPI)",
+        ["mpi.cpp", "mpi.cc", "mpi.cxx", "mpi.c++", "mpi.hpp", "mpi.h"],
+        image_name="cpp-omp-mpi",
+    ),
     Language("Verilog", ["v", "vh"], False),
+    Language("Zig", ["zig"], False),
 ]
 
 # Build lookup table for language extensions
