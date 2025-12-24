@@ -9,3 +9,24 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  # --- DOCKER IMAGES ---
+  - package-ecosystem: "docker"
+    directories: ["*"]
+    schedule:
+      interval: "weekly"
+    groups:
+      docker-images:
+        patterns:
+          - "*"
+    labels:
+      - "docker"
+      - "dependabot"
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: "chore(docker-images)"
