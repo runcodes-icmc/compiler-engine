@@ -4,7 +4,7 @@ verify_ssl = true
 name = "pypi"
 
 [packages]
-boto3 = "1.42.16"
+boto3 = "1.42.24"
 docker = "7.1.0"
 psycopg2-binary = "2.9.11"
 
