@@ -5,7 +5,6 @@ Module for handling configuration.
 import json
 import os
 
-
 DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
 
@@ -69,7 +68,9 @@ class EnvConfig(Config):
                 "compilation_files_dir": "compilationfiles",
             },
             "lock_file": "compiler.lock",
-            "num_workers": 1,
+            "num_workers": int(
+                os.environ.get("RUNCODES_COMPILER_NUM_WORKERS", f"{os.cpu_count()}")
+            ),
             "min_sleep_time": 1,
             "max_sleep_time": 15,
             "exec_dir": os.environ.get("RUNCODES_COMPILER_EXEC_DIR", "/tmp"),
