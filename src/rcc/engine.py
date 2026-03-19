@@ -5,22 +5,22 @@ import asyncio.subprocess
 import configparser
 import contextlib
 import datetime
-import docker
 import filecmp
 import itertools as it
-import multiprocessing as mp
 import logging
+import multiprocessing as mp
 import os
-import requests
 import shutil
 import zipfile
 
-import rcc.config
+import docker
+import requests
+
 import rcc.cmp
+import rcc.config
 import rcc.provider
 import rcc.provider.storage
 import rcc.util
-
 from rcc.model import Commit, TestCase, TestCaseResult
 
 from .languages import language_from_extension
@@ -388,8 +388,9 @@ def process_commit(data_provider, commit):
         cleanup_tests(base_dir)
     except:
         logger.error(
-            "[{c.id}] Could not save results, commit data might be"
-            " inconsistent".format(c=commit),
+            "[{c.id}] Could not save results, commit data might be inconsistent".format(
+                c=commit
+            ),
             exc_info=True,
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
