@@ -26,10 +26,10 @@ class Config:
     def update(self, other):
         """Update stored configuration using another `Config` or `dict`."""
         if isinstance(other, Config):
-            self._Config__config__.update(other._Config__config__)
+            self.__config__.update(other.get_dict())
         elif isinstance(other, dict):
             _check_dict(other)
-            self._Config__config__.update(other)
+            self.__config__.update(other)
 
     def get_dict(self):
         """Return the underlying configuration dictionary."""
@@ -40,11 +40,11 @@ class Config:
 
     def __getstate__(self):
         """Return state for pickling."""
-        return {"_Config__config__": self.__config__}
+        return {"__config__": self.__config__}
 
     def __setstate__(self, state):
         """Restore state from pickling."""
-        self.__config__ = state["_Config__config__"]
+        self.__config__ = state["__config__"]
 
     def __repr__(self):
         return self.__config__.__repr__()
