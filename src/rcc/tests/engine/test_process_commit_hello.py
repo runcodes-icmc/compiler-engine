@@ -217,6 +217,9 @@ class TestEngineHello(unittest.TestCase):
         self.storage_from_config = rcc.provider.storage.from_config
         rcc.provider.storage.from_config = MockStorageProvider
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        if cfg is None:
+            # Register a default configuration for tests
+            cfg = rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, {})
         cfg.update({"max_output_file_size": 1024 * 1024})
         self.handler = logging.StreamHandler(sys.stderr)
         self.handler.setLevel(logging.DEBUG)
@@ -233,7 +236,8 @@ class TestEngineHello(unittest.TestCase):
         logger.removeHandler(self.handler)
 
     def run_test_process_commit(self, commit):
-        rcc.engine.process_commit(self.data_prov, commit)
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        rcc.engine.process_commit(self.data_prov, commit, cfg)
         self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
         self.assertEqual(commit.score, 10)
         self.assertEqual(commit.corrects, 1)

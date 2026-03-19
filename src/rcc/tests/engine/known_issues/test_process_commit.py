@@ -1,16 +1,14 @@
 import datetime
 import logging
-import multiprocessing as mp
 import os
+import shutil
+import sys
+import unittest
+
 import rcc.config
 import rcc.engine
 import rcc.provider.data
 import rcc.provider.storage
-import shutil
-import sys
-import unittest
-import zipfile
-
 from rcc.model import Commit, TestCase
 
 # Metadata sample
@@ -41,7 +39,12 @@ commit_metadata = [
         "expected_status": Commit.STATUS_COMPLETED,
         "exercise": {
             "id": 1,
-            "test_cases": [{"id": 10, "out_type": TestCase.IO_TYPE_TEXT,},],
+            "test_cases": [
+                {
+                    "id": 10,
+                    "out_type": TestCase.IO_TYPE_TEXT,
+                },
+            ],
         },
     },
     {
@@ -53,7 +56,11 @@ commit_metadata = [
         "exercise": {
             "id": 2,
             "test_cases": [
-                {"id": i, "out_type": TestCase.IO_TYPE_TEXT,} for i in range(4)
+                {
+                    "id": i,
+                    "out_type": TestCase.IO_TYPE_TEXT,
+                }
+                for i in range(4)
             ],
         },
     },
@@ -66,7 +73,11 @@ commit_metadata = [
         "exercise": {
             "id": 3,
             "test_cases": [
-                {"id": 10, "out_type": TestCase.IO_TYPE_TEXT, "files": ["3.in"],},
+                {
+                    "id": 10,
+                    "out_type": TestCase.IO_TYPE_TEXT,
+                    "files": ["3.in"],
+                },
             ],
         },
     },
@@ -79,7 +90,11 @@ commit_metadata = [
         "exercise": {
             "id": 4,
             "test_cases": [
-                {"id": i, "out_type": TestCase.IO_TYPE_TEXT,} for i in range(1, 11)
+                {
+                    "id": i,
+                    "out_type": TestCase.IO_TYPE_TEXT,
+                }
+                for i in range(1, 11)
             ],
         },
     },
@@ -230,5 +245,6 @@ class TestEngineKnownIssues(unittest.TestCase):
         for metadata in commit_metadata:
             commit = build_commit(metadata)
             with self.subTest(name=commit.user_email):
-                rcc.engine.process_commit(self.data_prov, commit)
+                cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+                rcc.engine.process_commit(self.data_prov, commit, cfg)
                 self.assertEqual(commit.status, metadata["expected_status"])

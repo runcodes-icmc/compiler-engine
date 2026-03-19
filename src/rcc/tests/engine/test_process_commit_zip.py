@@ -185,6 +185,10 @@ class TestEngineZip(unittest.TestCase):
         self.data_prov = hello.MockDataProvider()
         self.S3Provider = rcc.provider.storage.S3
         rcc.provider.storage.S3 = MockStorageProvider
+        # Ensure configuration is registered for tests
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        if cfg is None:
+            cfg = rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, {})
         self.handler = logging.StreamHandler(sys.stdout)
         self.handler.setLevel(logging.DEBUG)
         self.handler.setFormatter(
@@ -199,7 +203,8 @@ class TestEngineZip(unittest.TestCase):
         logger.removeHandler(self.handler)
 
     def run_test_process_commit(self, commit):
-        rcc.engine.process_commit(self.data_prov, commit)
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        rcc.engine.process_commit(self.data_prov, commit, cfg)
         self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
         self.assertEqual(commit.score, 10)
         self.assertEqual(commit.corrects, 1)
@@ -222,7 +227,8 @@ class TestEngineZip(unittest.TestCase):
 
     def test_process_commit_zip_java(self):
         commit = build_commit(5, "java", "hello.zip", "Zip/Makefile")
-        rcc.engine.process_commit(self.data_prov, commit)
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        rcc.engine.process_commit(self.data_prov, commit, cfg)
         self.run_test_process_commit(commit)
 
     # def test_process_commit_zip_m(self):

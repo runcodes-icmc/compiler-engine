@@ -8,6 +8,7 @@ import itertools as it
 import logging
 import os
 import shutil
+import sys
 import zipfile
 
 import docker
@@ -234,7 +235,13 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
 def run_tests(
     data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
 ):
-    loop = asyncio.get_event_loop()
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        # No event loop in current thread, create a new one
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
     run_task = run(data_provider, commit, test_cases, base_dir, remote_dir)
     loop.run_until_complete(run_task)
     # loop.close()
@@ -304,8 +311,9 @@ def cleanup_tests(base_dir):
         shutil.rmtree(base_dir, onexc=rmtree_handler)
 
 
-def process_commit(data_provider, commit):
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+def process_commit(data_provider, commit, cfg=None):
+    if cfg is None:
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     logger.debug(
         "[{c.id}]"
@@ -396,9 +404,26 @@ def process_commit(data_provider, commit):
     logger.debug("[{c.id}] Commit processing done".format(c=commit))
 
 
-def process_commits(data_provider, commit_queue):
+def process_commits(data_provider, commit_queue, cfg=None):
+    # Set up logging for worker process
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+
+    # Only add handlers if logger doesn't have any (worker processes don't inherit parent's handlers)
+    if not logger.handlers:
+        logger.setLevel(logging.DEBUG)
+        console_handler = logging.StreamHandler(sys.stderr)
+        console_fmt = logging.Formatter(
+            "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
+        )
+        console_handler.setFormatter(console_fmt)
+        logger.addHandler(console_handler)
+
     logger.debug("Worker started")
+
+    # Register configuration if provided
+    if cfg is not None:
+        # Access the underlying configuration dictionary
+        rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, cfg.get_dict())
 
     # exceptions that stop the worker
     non_retryable_exceptions = (
@@ -418,7 +443,7 @@ def process_commits(data_provider, commit_queue):
                     # Hint to stop processing, mark empty task as done (in finally block) and bail
                     break
 
-                process_commit(data_provider, commit)
+                process_commit(data_provider, commit, cfg)
 
             # If exception should stop the worker
             except non_retryable_exceptions as e:

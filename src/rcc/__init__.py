@@ -78,7 +78,7 @@ def main():
         task_queue = mp.JoinableQueue()
         engine_workers = [
             mp.Process(
-                target=rcc.engine.process_commits, args=(data_provider, task_queue)
+                target=rcc.engine.process_commits, args=(data_provider, task_queue, cfg)
             )
             for _ in range(cfg.num_workers)
         ]
