@@ -1,9 +1,10 @@
-from .storage_provider import StorageProvider
+import os
 
 import boto3
 import boto3.session
 from botocore.config import Config
-import os
+
+from .storage_provider import StorageProvider
 
 
 class S3(StorageProvider):
@@ -17,9 +18,11 @@ class S3(StorageProvider):
             aws_secret_access_key=cfg.s3["secret_key"],
             region_name=cfg.s3["region"],
         )
-        s3 = s.resource("s3",
-                        endpoint_url=cfg.s3["endpoint"],
-                        config=Config(s3={"addressing_style": "path"}))
+        s3 = s.resource(
+            "s3",
+            endpoint_url=cfg.s3["endpoint"],
+            config=Config(s3={"addressing_style": "path"}),
+        )
         self.commits_bucket = s3.Bucket(cfg.s3["commits_bucket"])
         self.outputfiles_bucket = s3.Bucket(cfg.s3["outputfiles_bucket"])
         self.files_bucket = s3.Bucket(cfg.s3["files_bucket"])
@@ -34,12 +37,10 @@ class S3(StorageProvider):
         self.files_bucket.download_file(source, destination)
 
     def fetch_test_case_input_file(self, test_case, destination):
-        self.cases_bucket.download_file(
-            "{}/in".format(test_case.id), destination)
+        self.cases_bucket.download_file("{}/in".format(test_case.id), destination)
 
     def fetch_test_case_output_file(self, test_case, destination):
-        self.cases_bucket.download_file(
-            "{}/out".format(test_case.id), destination)
+        self.cases_bucket.download_file("{}/out".format(test_case.id), destination)
 
     def fetch_test_case_files(self, test_case, destination):
         for fname in test_case.files:

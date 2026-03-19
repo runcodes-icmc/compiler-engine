@@ -1,5 +1,6 @@
 from __future__ import unicode_literals
 
+
 class Commit:
     STATUS_IN_QUEUE = 0
     STATUS_COMPILING = 1

@@ -1,16 +1,14 @@
 import datetime
 import logging
-import multiprocessing as mp
 import os
+import sys
+import unittest
+
 import rcc.config
 import rcc.engine
 import rcc.provider.data
 import rcc.provider.storage
-import sys
-import unittest
-
 from rcc.model import Commit, TestCase
-
 
 hello_c_src = """
 #include <stdio.h>

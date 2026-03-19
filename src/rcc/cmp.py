@@ -15,7 +15,7 @@ def text_cmp(file1, file2):
             return text_cmp(file1, f2)
     try:
         for line1, line2 in zip_longest(file1, file2):
-            if line1 == None or line2 == None:
+            if line1 is None or line2 is None:
                 return False
             if line1.rstrip() != line2.rstrip():
                 return False
@@ -35,15 +35,15 @@ def text_cmp2(file1, file2):
         while True:
             line1 = next(file1, None)
             line2 = next(file2, None)
-            if line1 == None or line2 == None:
+            if line1 is None or line2 is None:
                 break
             while line1.strip() == "":
                 line1 = next(file1, None)
-                if line1 == None:
+                if line1 is None:
                     return False
             while line2.strip() == "":
                 line2 = next(file2, None)
-                if line2 == None:
+                if line2 is None:
                     return False
             if line1 != line2:
                 tokens1 = line1.lower().split()
@@ -75,7 +75,7 @@ def number_cmp(file1, file2, abs_error):
         raise ValueError("Error must be positive")
     try:
         for line1, line2 in zip_longest(file1, file2):
-            if line1 == None or line2 == None:
+            if line1 is None or line2 is None:
                 return False
             tokens1 = line1.split()
             tokens2 = line2.split()

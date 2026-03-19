@@ -1,14 +1,11 @@
 from __future__ import division, print_function, unicode_literals
 
 import asyncio
-import asyncio.subprocess
 import configparser
-import contextlib
 import datetime
 import filecmp
 import itertools as it
 import logging
-import multiprocessing as mp
 import os
 import shutil
 import zipfile
@@ -22,8 +19,6 @@ import rcc.provider
 import rcc.provider.storage
 import rcc.util
 from rcc.model import Commit, TestCase, TestCaseResult
-
-from .languages import language_from_extension
 
 DEFAULT_MKDIR_PERMISSIONS = 0o777
 
@@ -302,11 +297,11 @@ def compute_score(commit, test_cases, test_results):
 def cleanup_tests(base_dir):
     if os.path.isdir(base_dir):
 
-        def rmtree_handler(func, path, exc_info):
+        def rmtree_handler(_func, _path, exc_info):
             exc_type, exc_value, _ = exc_info
             raise exc_type(exc_value)
 
-        shutil.rmtree(base_dir, onerror=rmtree_handler)
+        shutil.rmtree(base_dir, onexc=rmtree_handler)
 
 
 def process_commit(data_provider, commit):
@@ -321,7 +316,7 @@ def process_commit(data_provider, commit):
 
     try:
         storage_provider = rcc.provider.storage.from_config(cfg)
-    except:
+    except Exception:
         logger.error("[{c.id}] Storage provider error".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         data_provider.update_commit(commit)
@@ -329,14 +324,14 @@ def process_commit(data_provider, commit):
 
     try:
         test_cases = data_provider.fetch_test_cases(commit)
-    except:
+    except Exception:
         logger.error(
             "[{c.id}] Failed to fetch test cases".format(c=commit), exc_info=True
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
         data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
-            cleanup_tests(base_dir)
+            cleanup_tests(os.path.join(cfg.exec_dir, "commit_{}".format(commit.id)))
         return
 
     # Delete results already produced by this commit, if any
@@ -355,7 +350,7 @@ def process_commit(data_provider, commit):
         create_container_cfg_file(commit, test_cases, base_dir)
         copy_source_files(data_provider, storage_provider, commit, base_dir)
         copy_test_case_files(storage_provider, test_cases, base_dir)
-    except:
+    except Exception:
         logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         data_provider.update_commit(commit)
@@ -368,7 +363,7 @@ def process_commit(data_provider, commit):
         test_results = run_tests(
             data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
         )
-    except:
+    except Exception:
         logger.error("[{c.id}] Failed to run tests".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         data_provider.update_commit(commit)
@@ -386,7 +381,7 @@ def process_commit(data_provider, commit):
             output_fname = prepare_output_file(commit, base_dir)
             storage_provider.store_commit_output(commit, output_fname)
         cleanup_tests(base_dir)
-    except:
+    except Exception:
         logger.error(
             "[{c.id}] Could not save results, commit data might be inconsistent".format(
                 c=commit

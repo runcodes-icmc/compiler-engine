@@ -1,20 +1,16 @@
-from six import StringIO
-
 import datetime
 import logging
-import multiprocessing as mp
-import rcc.config
-import rcc.engine
-import rcc.provider.data
-import rcc.provider.storage
 import sys
 import unittest
 import zipfile
 
 import tests.engine.test_process_commit_hello as hello
+from six import StringIO
 
-from rcc.model import Commit, TestCase
-
+import rcc.config
+import rcc.engine
+import rcc.provider.storage
+from rcc.model import Commit
 
 make_c = """
 all:
@@ -160,7 +156,7 @@ class MockStorageProvider(rcc.provider.storage.StorageProvider):
             src_fname = ".".join(("hello", names[commit.id - 1]))
             src_code = sources[commit.id - 1]
             make = makes[commit.id - 1]
-            with StringIO() as src_file:
+            with StringIO():
                 zip_file.writestr(src_fname, src_code)
                 zip_file.writestr("Makefile", make)
 

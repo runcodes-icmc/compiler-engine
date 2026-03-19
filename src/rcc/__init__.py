@@ -1,17 +1,17 @@
 from __future__ import unicode_literals
 
-from six.moves import range
-
 import argparse
 import logging
 import logging.handlers
-import sys
 import multiprocessing as mp
+import sys
+
+from six.moves import range
+
 import rcc.config
 import rcc.engine
 import rcc.provider
 import rcc.provider.data
-import rcc.provider.storage
 import rcc.util
 
 
@@ -26,14 +26,16 @@ def parse_args():
     return parser.parse_args()
 
 
-def setup_logger(name, log_config, slack_config=None):
+def setup_logger(name, log_config):
     # NOTE: should we handle multiprocessing?
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
     # Console Logger
     console_handler = logging.StreamHandler(sys.stderr)
-    console_fmt = logging.Formatter("[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s")
+    console_fmt = logging.Formatter(
+        "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
+    )
     console_handler.setFormatter(console_fmt)
     logger.addHandler(console_handler)
 
@@ -47,22 +49,11 @@ def setup_logger(name, log_config, slack_config=None):
         handler.setLevel(log_config["level"])
         handler.setFormatter(formatter)
         logger.addHandler(handler)
-    
-    # Slack Logger
-    if slack_config is not None:
-        fmt = "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
-        formatter = logging.Formatter(fmt)
-        handler = rcc.util.SlackLogHandler(
-            slack_config["webhook_url"], slack_config["sender_name"]
-        )
-        handler.setLevel(slack_config["level"])
-        handler.setFormatter(formatter)
-        logger.addHandler(handler)
 
     return logger
 
 
-def commit_filter(commit):
+def commit_filter(_):
     return True
 
 
@@ -73,7 +64,7 @@ def main():
     else:
         cfg = rcc.config.from_json(rcc.config.DEFAULT_CONFIG, args.config)
 
-    logger = setup_logger(rcc.config.DEFAULT_LOGGER, cfg.log, cfg.slack)
+    logger = setup_logger(rcc.config.DEFAULT_LOGGER, cfg.log)
 
     with rcc.util.SingletonContext(cfg.lock_file):
         logger.info("Started")
@@ -89,7 +80,7 @@ def main():
             mp.Process(
                 target=rcc.engine.process_commits, args=(data_provider, task_queue)
             )
-            for i in range(cfg.num_workers)
+            for _ in range(cfg.num_workers)
         ]
 
         # Poll for new commits and put them in our internal processing queue
@@ -111,7 +102,7 @@ def main():
                     task_queue.join()
                     sleeper.reset()
                 sleeper.sleep()
-        except KeyboardInterrupt as e:
+        except KeyboardInterrupt:
             logger.info("Interrupted; waiting for workers")
             try:
                 for worker in engine_workers:
@@ -122,7 +113,7 @@ def main():
                 # Join each worker to ensure all of them are done
                 for worker in engine_workers:
                     worker.join()
-            except KeyboardInterrupt as e:
+            except KeyboardInterrupt:
                 # Give up and terminate everything
                 logger.info("Aborted")
                 for worker in engine_workers:

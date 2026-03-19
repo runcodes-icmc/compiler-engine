@@ -1,5 +1,5 @@
-from .storage_provider import StorageProvider
 from .s3 import S3
+from .storage_provider import StorageProvider
 
 
 def from_config(cfg):

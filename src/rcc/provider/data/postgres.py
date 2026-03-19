@@ -1,14 +1,14 @@
 from __future__ import unicode_literals
 
-from .data_provider import DataProvider
-from ...model import Commit, TestCase
-
 import base64
 import contextlib
-import os
+
 import psycopg2
-import rcc.util
+
 from rcc.languages import language_from_extension
+
+from ...model import Commit, TestCase
+from .data_provider import DataProvider
 
 
 class Postgres(DataProvider):
@@ -32,7 +32,7 @@ class Postgres(DataProvider):
     def commit_from_row(row):
         real_exercise_id = row[18] if row[17] else row[2]
         slash_index = row[15].rfind("/")
-        fname = row[15][slash_index + 1:]
+        fname = row[15][slash_index + 1 :]
         c = Commit(
             row[0],  # id
             row[1],  # user_email
@@ -101,7 +101,8 @@ class Postgres(DataProvider):
                     cursor.execute(query, (Commit.STATUS_IN_QUEUE,))
                     commits = [Postgres.commit_from_row(row) for row in cursor]
                     for commit in commits:
-                        commit.language = language_from_extension(commit.fname)
+                        if commit.fname is not None:
+                            commit.language = language_from_extension(commit.fname)
                     return commits
 
     def update_commit(self, commit):
@@ -124,8 +125,7 @@ class Postgres(DataProvider):
         )
 
         compiled_message = (commit.compiled_message or "").encode("utf8")
-        compiled_message = base64.b64encode(
-            compiled_message).decode("utf8")
+        compiled_message = base64.b64encode(compiled_message).decode("utf8")
 
         compiled_error = (commit.compiled_error or "").encode("utf8")
         compiled_error = base64.b64encode(compiled_error).decode("utf8")
@@ -234,16 +234,13 @@ class Postgres(DataProvider):
             " WHERE exercise_id = %s"
             " ORDER BY id"
         )
-        files_query = (
-            "SELECT path" " FROM exercise_case_files" " WHERE exercise_case_id = %s"
-        )
+        files_query = "SELECT path FROM exercise_case_files WHERE exercise_case_id = %s"
         with contextlib.closing(self._connect()) as connection:
             with connection:
                 with connection.cursor() as cursor:
                     # Fetch test case metadata
                     cursor.execute(query, (commit.real_exercise_id,))
-                    test_cases = [Postgres.test_case_from_row(
-                        row) for row in cursor]
+                    test_cases = [Postgres.test_case_from_row(row) for row in cursor]
                     # Fetch the list of files of each test case
                     for test_case in test_cases:
                         cursor.execute(files_query, (test_case.id,))

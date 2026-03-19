@@ -1,8 +1,8 @@
+import unittest
+
 from six import StringIO
 
 import rcc.cmp
-import unittest
-
 
 test_a = """hello, world"""
 test_b = """

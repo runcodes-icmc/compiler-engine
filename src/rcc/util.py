@@ -3,7 +3,6 @@ Collection of utilities.
 """
 
 from __future__ import unicode_literals
-from six.moves import urllib
 
 import datetime
 import fcntl
@@ -30,7 +29,7 @@ class SingletonContext(object):
             fcntl.lockf(self.lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
             print(os.getpid(), file=self.lock_file)
         except IOError:
-            self.close()
+            self.lock_file.close()
             raise RuntimeError(
                 "Cannot enter singleton context (lock file: {})".format(
                     self.lock_file.name
@@ -99,15 +98,15 @@ def standardize_extension(ext_raw):
     not supposed to be 'correct' extensions, but to reference files from the
     same language in a unified way.
     """
-    ext = ext_raw.split('.')[-1]
-    
+    ext = ext_raw.split(".")[-1]
+
     if ext in ("zip"):
         return ext
-    
+
     language = language_from_extension(ext)
     if language is not None:
         return language.standard_extension
-    
+
     return None
 
 
@@ -115,7 +114,7 @@ def deduce_language(zip_file):
     counts = dict()
     fnames = zip_file.namelist()
     for fname in fnames:
-        name, ext = os.path.splitext(fname)
+        _, ext = os.path.splitext(fname)
         if ext == "":
             continue
         ext = standardize_extension(ext[1:])
@@ -140,5 +139,5 @@ def is_compilable(ext):
 
 
 def from_datetime_to_timestamp(dt: datetime.datetime) -> int:
-    epoch = datetime.datetime.utcfromtimestamp(0)
-    return (dt - epoch).total_seconds()
+    epoch = datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc)
+    return int((dt - epoch).total_seconds())
