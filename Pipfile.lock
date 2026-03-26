@@ -30,11 +30,11 @@
                 "s3"
             ],
             "hashes": [
-                "sha256:41fc40b5eebd42acc449764931aae6cbd4543efd3817b1b4fa60b41f5449d4b6",
-                "sha256:c244887967a5cef751ca23a2adeeca9ead6ad85edd79513bce088bb89a33b373"
+                "sha256:13863d2dc56a3df2f7e35b6cc5b9fe6dcc9024c24357ad470648f60ad4a7c9b7",
+                "sha256:6a56ab2838bac7891c58f19c533cdf25dfaadee49ee1d58c4551363291cb59f9"
             ],
             "markers": "python_version >= '3.9'",
-            "version": "==1.42.72"
+            "version": "==1.42.76"
         },
         "botocore": {
             "hashes": [
