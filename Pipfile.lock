@@ -30,11 +30,11 @@
                 "s3"
             ],
             "hashes": [
-                "sha256:41fc40b5eebd42acc449764931aae6cbd4543efd3817b1b4fa60b41f5449d4b6",
-                "sha256:c244887967a5cef751ca23a2adeeca9ead6ad85edd79513bce088bb89a33b373"
+                "sha256:85fc12337f70523e25f30885b80feeecf8623977aba53f7672bd37a5674718a3",
+                "sha256:9f2f4de654e47a1826a86ade7bf4ef7f6277eacbdf3a6a45903b3df535d8a789"
             ],
             "markers": "python_version >= '3.9'",
-            "version": "==1.42.72"
+            "version": "==1.42.86"
         },
         "botocore": {
             "hashes": [
@@ -222,11 +222,11 @@
         },
         "mypy-boto3-s3": {
             "hashes": [
-                "sha256:3a3a918a9949f2d6f8071d490b8968ddce634aa19590697537e5189cbdca403e",
-                "sha256:93208799734611da4caa5fa8f5ce677b62758ddcd34b737b9f7ae471d179b95e"
+                "sha256:401e3a184ac0973bc08b556cc3b2655d8f2e56570b6ed87ce635210df4f666fb",
+                "sha256:b2cad995ea733b16ae3be5510fd6a0038aa44400c22d010d4def9286cf6eaf82"
             ],
             "markers": "python_version >= '3.9'",
-            "version": "==1.42.67"
+            "version": "==1.42.85"
         },
         "psycopg2-binary": {
             "hashes": [
