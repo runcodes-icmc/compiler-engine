@@ -7,8 +7,10 @@ import filecmp
 import itertools as it
 import logging
 import os
+import queue
 import shutil
 import sys
+import threading
 import zipfile
 
 import docker
@@ -23,6 +25,15 @@ from rcc.model import Commit, TestCase, TestCaseResult
 
 DEFAULT_MKDIR_PERMISSIONS = 0o777
 
+# How long a worker's pull loop waits on an empty task queue before checking
+# whether a non-retryable failure in an in-flight commit must stop the worker.
+QUEUE_GET_POLL_TIMEOUT = 1.0
+
+# How long run() waits for the container log reader thread to terminate after
+# the container is gone. The thread is a daemon, so this only bounds the wait;
+# it never blocks process exit.
+CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
+
 
 def set_extension(commit):
     _, extension = os.path.splitext(commit.fname)
@@ -35,9 +46,9 @@ async def copy_source_files(data_provider, storage_provider, commit, base_dir):
     src_dir = os.path.join(base_dir, cfg.src_dir)
     os.makedirs(src_dir, DEFAULT_MKDIR_PERMISSIONS)
 
-    # Copy commit files
+    # Copy commit files (boto3 downloads run in a worker thread)
     destination = os.path.join(src_dir, os.path.basename(commit.fname))
-    storage_provider.fetch_commit_file(commit, destination)
+    await asyncio.to_thread(storage_provider.fetch_commit_file, commit, destination)
 
     # Add info about file extension and whether the submission is compilable
     set_extension(commit)
@@ -54,7 +65,9 @@ async def copy_source_files(data_provider, storage_provider, commit, base_dir):
     for fname in fnames:
         fname = os.path.join(str(commit.real_exercise_id), fname)
         destination = os.path.join(src_dir, os.path.basename(fname))
-        storage_provider.fetch_exercise_file(fname, destination)
+        await asyncio.to_thread(
+            storage_provider.fetch_exercise_file, fname, destination
+        )
 
 
 def copy_test_case_files(storage_provider, test_cases, base_dir):
@@ -141,95 +154,203 @@ def process_test_results(storage_provider, commit, test_case, base_dir):
     )
 
 
-async def expect_message(outputs, expected, timeout):
-    async def next_message():
-        message = next(outputs)
-        message = message.decode("utf8").strip()
-        return message
+class ContainerLogReader:
+    """Bridge between docker-py's blocking log generator and asyncio.
 
-    message = await asyncio.wait_for(next_message(), timeout)
+    ``container.logs(stream=True)`` returns a blocking generator: iterating it
+    on the event loop would stall the whole worker for the container's
+    lifetime. Instead, a daemon reader thread consumes the generator and
+    pushes every decoded line into an :class:`asyncio.Queue`. Because
+    ``asyncio.Queue`` is not thread-safe, pushes go through
+    ``loop.call_soon_threadsafe``, which is the documented way to enqueue from
+    another thread.
+
+    When the generator is exhausted — the container stopped or its API
+    connection closed — the ``END`` sentinel is pushed, so consumers can
+    distinguish "end of stream" from "no data yet". The thread terminates by
+    itself when the generator ends; if a container hangs forever the thread
+    stays blocked in the generator, but it is a daemon thread and the number
+    of stuck readers is bounded by the worker's per-commit concurrency limit,
+    so it can never block process exit.
+
+    One queue item corresponds to exactly one chunk yielded by the generator
+    (which the docker API delivers line by line), preserving the semantics of
+    the previous synchronous ``next(outputs)`` reads.
+    """
+
+    # Sentinel pushed once the log stream ends.
+    END = object()
+
+    def __init__(self, logs_generator, loop):
+        self._generator = logs_generator
+        self._loop = loop
+        self._queue = asyncio.Queue()
+        self._thread = threading.Thread(
+            target=self._read_loop,
+            name="container-log-reader",
+            daemon=True,
+        )
+
+    def start(self):
+        """Start the reader thread."""
+        self._thread.start()
+
+    def stop(self):
+        """Best-effort wait for the reader thread to terminate.
+
+        The thread ends on its own once the generator is exhausted (which
+        happens when the container exits or its API connection closes); this
+        only bounds how long we are willing to wait for it.
+        """
+        if self._thread.is_alive():
+            self._thread.join(timeout=CONTAINER_LOG_READER_JOIN_TIMEOUT)
+
+    async def get(self):
+        """Return the next decoded log line, or ``END`` when the stream ended."""
+        return await self._queue.get()
+
+    def _push(self, item):
+        """Schedule an item for the loop thread; False if the loop is closing."""
+        try:
+            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+            return True
+        except RuntimeError:
+            # Event loop is closed (worker shutting down): stop reading.
+            return False
+
+    def _read_loop(self):
+        try:
+            for raw in self._generator:
+                if isinstance(raw, bytes):
+                    raw = raw.decode("utf8")
+                if not self._push(raw.strip()):
+                    break
+        except Exception as e:
+            # The generator raised (connection dropped, decode error, ...):
+            # treat the stream as ended.
+            logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+            logger.debug("Container log stream terminated: %s", e)
+        finally:
+            self._push(self.END)
+
+
+async def expect_message(log_reader, expected, timeout):
+    """Wait for the next line of the container's log stream to be ``expected``.
+
+    Reads decoded, stripped lines from the :class:`ContainerLogReader` queue.
+    Raises ``TimeoutError`` when nothing arrives within ``timeout`` seconds,
+    ``RuntimeError`` when the stream ends early, and ``RuntimeError`` when the
+    stream delivers an unexpected line.
+    """
+    message = await asyncio.wait_for(log_reader.get(), timeout)
+    if message is ContainerLogReader.END:
+        raise RuntimeError(
+            "Container log stream ended before receiving `{}`".format(expected)
+        )
     if message != expected:
         raise RuntimeError("Expected `{}`, got `{}`".format(expected, message))
 
 
 async def run(data_provider, commit, test_cases, base_dir, remote_dir):
+    """Run the submitted code in a container, streaming its log messages.
+
+    Every blocking docker SDK call (client creation, container start, the log
+    stream, ``wait``/``kill``/``remove``) is offloaded to a worker thread so
+    the event loop stays free to process other commits while the container
+    runs. Container logs are pumped into the loop by a dedicated reader thread
+    (see :class:`ContainerLogReader`) and awaited via :func:`expect_message`.
+
+    A fresh docker client is created per commit: each concurrent task gets its
+    own client, which also sidesteps docker-py thread-safety questions.
+    """
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
 
-    client = docker.from_env()
+    client = await asyncio.to_thread(docker.from_env)
     volumes = {
         remote_dir: {"bind": "/root", "mode": "rw"},
     }
-    container = client.containers.run(
-        commit.language.image, detach=True, remove=False, volumes=volumes
+    container = await asyncio.to_thread(
+        client.containers.run,
+        commit.language.image,
+        detach=True,
+        remove=False,
+        volumes=volumes,
     )
 
-    container_stdout = container.logs(stream=True)
+    log_reader = ContainerLogReader(
+        await asyncio.to_thread(container.logs, stream=True),
+        asyncio.get_running_loop(),
+    )
+    log_reader.start()
 
-    if commit.is_compilable:
-        try:
-            # Compilation start
-            await expect_message(
-                container_stdout, "compilation.start", cfg.compilation_timeout
-            )
-
-            commit.status = Commit.STATUS_COMPILING
-            await data_provider.update_commit(commit)
-
-            # Compilation done
-            await expect_message(
-                container_stdout, "compilation.done", cfg.compilation_timeout
-            )
-
-            err_fname = os.path.join(base_dir, cfg.compilation_error_file)
-            # 'replace' is used because the compiler output may include text from
-            # the user-submitted file, which we have no control of
-            with open(err_fname, errors="replace") as err_file:
-                compiled_error = "".join(err_file.readlines()).strip()
-            if compiled_error != "":
-                commit.status = Commit.STATUS_ERROR
-                commit.compiled_error = compiled_error
-                commit.compiled_signal = 1
-                commit.is_compiled = False
-            else:
-                commit.status = Commit.STATUS_COMPILED
-                commit.is_compiled = True
-        except asyncio.TimeoutError:
-            logger.warning("Compilation timed out", exc_info=True)
-            raise RuntimeError("Compilation timed out")
-    else:
-        # NOTE: does not make much sense, but seems to be needed
-        commit.is_compiled = True
-
-    commit.compilation_finished_time = datetime.datetime.now()
-    await data_provider.update_commit(commit)
-
-    if commit.status != Commit.STATUS_ERROR:
-        try:
-            # Test cases execution start
-            base_timeout = cfg.base_exec_timeout * (1 + len(test_cases))
-            timeout = base_timeout + sum(c.cpu_time for c in test_cases)
-            await expect_message(container_stdout, "run.start", timeout)
-
-            commit.status = Commit.STATUS_RUNNING
-            await data_provider.update_commit(commit)
-
-            # Test cases execution done
-            await expect_message(container_stdout, "run.done", timeout)
-        except asyncio.TimeoutError:
-            logger.warning("Execution timed out", exc_info=True)
-            raise RuntimeError("Execution timed out")
     try:
-        container.wait(timeout=cfg.base_exec_timeout)
-    except requests.exceptions.ReadTimeout:
-        logger.error("Container wait timed out", exc_info=True)
-        container.kill()
-    finally:
-        # Ensure container is removed
+        if commit.is_compilable:
+            try:
+                # Compilation start
+                await expect_message(
+                    log_reader, "compilation.start", cfg.compilation_timeout
+                )
+
+                commit.status = Commit.STATUS_COMPILING
+                await data_provider.update_commit(commit)
+
+                # Compilation done
+                await expect_message(
+                    log_reader, "compilation.done", cfg.compilation_timeout
+                )
+
+                err_fname = os.path.join(base_dir, cfg.compilation_error_file)
+                # 'replace' is used because the compiler output may include text from
+                # the user-submitted file, which we have no control of
+                with open(err_fname, errors="replace") as err_file:
+                    compiled_error = "".join(err_file.readlines()).strip()
+                if compiled_error != "":
+                    commit.status = Commit.STATUS_ERROR
+                    commit.compiled_error = compiled_error
+                    commit.compiled_signal = 1
+                    commit.is_compiled = False
+                else:
+                    commit.status = Commit.STATUS_COMPILED
+                    commit.is_compiled = True
+            except asyncio.TimeoutError:
+                logger.warning("Compilation timed out", exc_info=True)
+                raise RuntimeError("Compilation timed out")
+        else:
+            # NOTE: does not make much sense, but seems to be needed
+            commit.is_compiled = True
+
+        commit.compilation_finished_time = datetime.datetime.now()
+        await data_provider.update_commit(commit)
+
+        if commit.status != Commit.STATUS_ERROR:
+            try:
+                # Test cases execution start
+                base_timeout = cfg.base_exec_timeout * (1 + len(test_cases))
+                timeout = base_timeout + sum(c.cpu_time for c in test_cases)
+                await expect_message(log_reader, "run.start", timeout)
+
+                commit.status = Commit.STATUS_RUNNING
+                await data_provider.update_commit(commit)
+
+                # Test cases execution done
+                await expect_message(log_reader, "run.done", timeout)
+            except asyncio.TimeoutError:
+                logger.warning("Execution timed out", exc_info=True)
+                raise RuntimeError("Execution timed out")
         try:
-            container.remove(force=True)
-        except Exception:
-            logger.error("Container removal failed", exc_info=True)
+            await asyncio.to_thread(container.wait, timeout=cfg.base_exec_timeout)
+        except requests.exceptions.ReadTimeout:
+            logger.error("Container wait timed out", exc_info=True)
+            await asyncio.to_thread(container.kill)
+        finally:
+            # Ensure container is removed
+            try:
+                await asyncio.to_thread(container.remove, force=True)
+            except Exception:
+                logger.error("Container removal failed", exc_info=True)
+    finally:
+        log_reader.stop()
 
 
 async def run_tests(
@@ -245,6 +366,20 @@ async def run_tests(
 
     if commit.status == Commit.STATUS_ERROR:
         return []
+    # `process_test_results` is synchronous and downloads the expected output
+    # of every test case from S3: run the whole batch in a worker thread so
+    # the boto3 calls do not block the event loop.
+    return await asyncio.to_thread(
+        process_test_results_batch, storage_provider, commit, test_cases, base_dir
+    )
+
+
+def process_test_results_batch(storage_provider, commit, test_cases, base_dir):
+    """Run :func:`process_test_results` for every test case (sync helper).
+
+    Called through ``asyncio.to_thread``: the per-case S3 downloads inside
+    :func:`process_test_results` are blocking calls.
+    """
     return [
         process_test_results(storage_provider, commit, test_case, base_dir)
         for test_case in test_cases
@@ -359,7 +494,11 @@ async def process_commit(data_provider, commit, cfg=None):
         os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
         create_container_cfg_file(commit, test_cases, base_dir)
         await copy_source_files(data_provider, storage_provider, commit, base_dir)
-        copy_test_case_files(storage_provider, test_cases, base_dir)
+        # `copy_test_case_files` is synchronous and downloads from S3: run it
+        # in a worker thread so the event loop is not blocked.
+        await asyncio.to_thread(
+            copy_test_case_files, storage_provider, test_cases, base_dir
+        )
     except Exception:
         logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
@@ -389,7 +528,10 @@ async def process_commit(data_provider, commit, cfg=None):
         await data_provider.store_commit_test_results(commit, test_results)
         if len(test_results) > 0:
             output_fname = prepare_output_file(commit, base_dir)
-            storage_provider.store_commit_output(commit, output_fname)
+            # boto3 upload runs in a worker thread
+            await asyncio.to_thread(
+                storage_provider.store_commit_output, commit, output_fname
+            )
         cleanup_tests(base_dir)
     except Exception:
         logger.error(
@@ -409,10 +551,20 @@ async def process_commit(data_provider, commit, cfg=None):
 async def process_commits(data_provider, commit_queue, cfg=None):
     """Worker main loop: pull commits from the queue and process them.
 
-    Runs on a dedicated event loop inside the worker process. The process's
-    database connection pool is opened here (one pool per process) and closed
-    when the worker stops. ``queue.get`` is offloaded to a thread so that the
-    event loop stays responsive while waiting for work.
+    Producer/consumer structure: a single loop pulls commits from the queue
+    and spawns one ``asyncio.create_task(process_commit(...))`` per commit. An
+    ``asyncio.Semaphore`` sized ``concurrency_per_worker`` bounds the number
+    of commits in flight inside this worker; the slot is acquired before the
+    task is spawned and released in the task's ``finally`` block, so a failing
+    commit can never leak a slot.
+
+    ``queue.get`` runs in a thread with a bounded wait so the loop can notice
+    failures of in-flight tasks. When the ``None`` stop hint arrives the loop
+    stops pulling and drains every in-flight commit before exiting. Exceptions
+    raised by a commit are classified as before: non-retryable ones stop the
+    worker (after the in-flight commits finish), retryable ones are logged and
+    skipped. The process database connection pool is opened here (one pool per
+    process) and closed when the worker stops.
     """
     # Set up logging for worker process
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
@@ -433,6 +585,18 @@ async def process_commits(data_provider, commit_queue, cfg=None):
     if cfg is not None:
         # Access the underlying configuration dictionary
         rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, cfg.get_dict())
+    else:
+        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+
+    if cfg is None:
+        # No configuration was passed and none is registered: fall back to
+        # the default concurrency (process_commit() would fail on the missing
+        # configuration anyway).
+        concurrency = rcc.config.DEFAULT_CONCURRENCY_PER_WORKER
+    else:
+        concurrency = int(
+            cfg.get("concurrency_per_worker", rcc.config.DEFAULT_CONCURRENCY_PER_WORKER)
+        )
 
     # exceptions that stop the worker
     non_retryable_exceptions = (
@@ -451,30 +615,72 @@ async def process_commits(data_provider, commit_queue, cfg=None):
         logger.error("Failed to open database connection pool", exc_info=True)
         raise
 
+    # Caps the number of commits processed concurrently by this worker.
+    semaphore = asyncio.Semaphore(concurrency)
+    # Registry of in-flight commit tasks: drained before the worker exits.
+    in_flight = set()
+    # Set when a commit raises a non-retryable exception: the pull loop stops
+    # spawning new work and exits after the in-flight commits are drained.
+    fatal = asyncio.Event()
+
+    async def run_commit(commit):
+        try:
+            await process_commit(data_provider, commit, cfg)
+        except non_retryable_exceptions as e:
+            logger.warning(f"Caught non-retryable exception: {e}")
+            fatal.set()
+        except Exception as e:
+            logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+        finally:
+            # Always give the slot back, even when the commit failed.
+            semaphore.release()
+
     try:
         with rcc.util.UninterruptibleContext():
             while True:
+                if fatal.is_set():
+                    break
                 try:
-                    commit = await asyncio.to_thread(commit_queue.get)
-
-                    if commit is None:
-                        # Hint to stop processing, mark empty task as done (in finally block) and bail
-                        break
-
-                    await process_commit(data_provider, commit, cfg)
-
-                # If exception should stop the worker
+                    # Bounded wait: lets the loop observe `fatal` (set by an
+                    # in-flight task) instead of blocking on an empty queue.
+                    commit = await asyncio.to_thread(
+                        commit_queue.get, True, QUEUE_GET_POLL_TIMEOUT
+                    )
+                except queue.Empty:
+                    continue
                 except non_retryable_exceptions as e:
                     logger.warning(f"Caught non-retryable exception: {e}")
                     break
-
-                # If the worker should retry
                 except Exception as e:
                     logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+                    continue
 
-                # Marks task as done
+                try:
+                    if commit is None:
+                        # Stop hint: mark the empty task as done (finally
+                        # block) and drain the in-flight commits.
+                        break
+                    await semaphore.acquire()
+                    try:
+                        task = asyncio.create_task(run_commit(commit))
+                    except BaseException:
+                        # Spawning failed: give the slot back immediately.
+                        semaphore.release()
+                        raise
+                    in_flight.add(task)
+                    task.add_done_callback(in_flight.discard)
+                except non_retryable_exceptions as e:
+                    logger.warning(f"Caught non-retryable exception: {e}")
+                    break
+                except Exception as e:
+                    logger.warning(f"Caught retryable exception: {e}", exc_info=True)
                 finally:
+                    # Marks task as done
                     commit_queue.task_done()
+
+            # Drain: wait for every in-flight commit before exiting.
+            if in_flight:
+                await asyncio.gather(*in_flight)
     finally:
         await data_provider.close()
 

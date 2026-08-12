@@ -8,6 +8,11 @@ import os
 DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
 
+# Default number of commits a single worker process may process concurrently.
+# Used as the fallback for JSON configuration files that do not define
+# ``concurrency_per_worker``.
+DEFAULT_CONCURRENCY_PER_WORKER = 4
+
 
 # Configs are registered here
 __config__ = dict()
@@ -34,6 +39,15 @@ class Config:
     def get_dict(self):
         """Return the underlying configuration dictionary."""
         return self.__config__
+
+    def get(self, key, default=None):
+        """Return ``config[key]``, or ``default`` when the key is missing.
+
+        Mirrors ``dict.get``. Used for optional keys (such as
+        ``concurrency_per_worker``) that JSON configuration files may not
+        define; attribute access would raise ``KeyError`` for those.
+        """
+        return self.__config__.get(key, default)
 
     def __getattr__(self, name):
         return self.__config__[name]
@@ -85,6 +99,13 @@ class EnvConfig(Config):
             "lock_file": "compiler.lock",
             "num_workers": int(
                 os.environ.get("RUNCODES_COMPILER_NUM_WORKERS", f"{os.cpu_count()}")
+            ),
+            # Number of commits each worker process handles concurrently.
+            "concurrency_per_worker": int(
+                os.environ.get(
+                    "RUNCODES_COMPILER_CONCURRENCY",
+                    str(DEFAULT_CONCURRENCY_PER_WORKER),
+                )
             ),
             "min_sleep_time": 1,
             "max_sleep_time": 15,
