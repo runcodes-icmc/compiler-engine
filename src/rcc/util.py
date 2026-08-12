@@ -79,12 +79,20 @@ class Sleeper(object):
         self.alpha = 0
 
     def sleep(self, increase=True):
+        time.sleep(self.sleep_time(increase))
+
+    def sleep_time(self, increase=True):
+        """Compute the next sleep duration and advance the internal counter.
+
+        Unlike :meth:`sleep`, this does not block, so it can be combined with
+        ``asyncio.sleep`` in async code.
+        """
         t = self.alpha * self.alpha
         t = self.min_time * (1.0 - t) + self.max_time * t
-        time.sleep(t)
 
         if increase and self.alpha < 1:
             self.alpha += self.step_size
+        return t
 
 
 def count_if(pred, iterable):

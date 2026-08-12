@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 import argparse
+import asyncio
 import logging
 import logging.handlers
 import multiprocessing as mp
@@ -57,7 +58,28 @@ def commit_filter(_):
     return True
 
 
-def main():
+def _stop_workers(engine_workers, task_queue, logger):
+    """Ask the workers to stop and wait for them to finish.
+
+    A second interruption aborts the wait and terminates every worker.
+    """
+    try:
+        for worker in engine_workers:
+            # The 'None' task is a hint for workers to stop processing
+            if worker.is_alive():
+                task_queue.put(None)
+
+        # Join each worker to ensure all of them are done
+        for worker in engine_workers:
+            worker.join()
+    except KeyboardInterrupt:
+        # Give up and terminate everything
+        logger.info("Aborted")
+        for worker in engine_workers:
+            worker.terminate()
+
+
+async def main():
     args = parse_args()
     if args.config == "env":
         cfg = rcc.config.from_env(rcc.config.DEFAULT_CONFIG)
@@ -78,7 +100,7 @@ def main():
         task_queue = mp.JoinableQueue()
         engine_workers = [
             mp.Process(
-                target=rcc.engine.process_commits, args=(data_provider, task_queue, cfg)
+                target=rcc.engine.run_worker, args=(data_provider, task_queue, cfg)
             )
             for _ in range(cfg.num_workers)
         ]
@@ -89,9 +111,17 @@ def main():
             for worker in engine_workers:
                 worker.start()
 
+            # Open this process's own connection pool. This happens after the
+            # workers have been spawned so the pool is never forked into or
+            # pickled towards a child process (every process opens its own
+            # pool). Connections are established lazily, so a database that is
+            # not up yet does not crash the process: poll cycles simply fail
+            # and are retried
+            await data_provider.open()
+
             while True:
                 try:
-                    commits = data_provider.fetch_commits_in_queue()
+                    commits = await data_provider.fetch_commits_in_queue()
                     commits = list(filter(commit_filter, commits))
                 except Exception:
                     logger.error("Could not fetch commits", exc_info=True)
@@ -101,25 +131,30 @@ def main():
                         task_queue.put(commit)
                     task_queue.join()
                     sleeper.reset()
-                sleeper.sleep()
+                await asyncio.sleep(sleeper.sleep_time())
         except KeyboardInterrupt:
+            # Only possible for a second Ctrl-C while the first one is already
+            # being handled (see the CancelledError branch below).
             logger.info("Interrupted; waiting for workers")
-            try:
-                for worker in engine_workers:
-                    # The 'None' task is a hint for workers to stop processing
-                    if worker.is_alive():
-                        task_queue.put(None)
-
-                # Join each worker to ensure all of them are done
-                for worker in engine_workers:
-                    worker.join()
-            except KeyboardInterrupt:
-                # Give up and terminate everything
-                logger.info("Aborted")
-                for worker in engine_workers:
-                    worker.terminate()
-    logger.info("Exited")
+            _stop_workers(engine_workers, task_queue, logger)
+        except asyncio.CancelledError:
+            # asyncio.run() (Python >= 3.11) translates the first Ctrl-C into
+            # cancellation of this task. Run the same graceful shutdown, then
+            # re-raise so asyncio.run() turns the cancellation back into a
+            # KeyboardInterrupt for the caller.
+            logger.info("Interrupted; waiting for workers")
+            _stop_workers(engine_workers, task_queue, logger)
+            raise
+        finally:
+            await data_provider.close()
+            # Also reached on (gracefully handled) interruption.
+            logger.info("Exited")
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        # asyncio.run() re-raises KeyboardInterrupt after gracefully stopping
+        # the workers: nothing left to do.
+        pass

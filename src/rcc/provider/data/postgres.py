@@ -1,9 +1,10 @@
 from __future__ import unicode_literals
 
 import base64
-import contextlib
 
-import psycopg2
+import psycopg
+import psycopg.conninfo
+from psycopg_pool import AsyncConnectionPool
 
 from rcc.languages import language_from_extension
 
@@ -12,21 +13,100 @@ from .data_provider import DataProvider
 
 
 class Postgres(DataProvider):
-    def __init__(self, cfg):
-        self.host = cfg.db["host"]
-        self.port = cfg.db["port"]
-        self.db_name = cfg.db["name"]
-        self.username = cfg.db["username"]
-        self.password = cfg.db["password"]
+    """PostgreSQL data provider backed by a shared async connection pool.
 
-    def _connect(self):
-        return psycopg2.connect(
-            host=self.host,
-            port=self.port,
-            dbname=self.db_name,
-            user=self.username,
-            password=self.password,
+    Instead of opening a fresh connection per call (the old psycopg2
+    pattern), every method now draws a connection from a single
+    `psycopg_pool.AsyncConnectionPool`, created lazily by :meth:`open` and
+    released by :meth:`close`.
+
+    One pool is created *per process*: one in the main polling process and
+    one in every worker process. Pools hold live sockets and background
+    tasks and cannot be shared across processes, so the pool is opened after
+    the multiprocessing workers have been spawned and is deliberately
+    stripped when this object is pickled (see :meth:`__getstate__`).
+    """
+
+    def __init__(self, cfg):
+        self._conninfo = psycopg.conninfo.make_conninfo(
+            host=cfg.db["host"],
+            port=cfg.db["port"],
+            dbname=cfg.db["name"],
+            user=cfg.db["username"],
+            password=cfg.db["password"],
         )
+        # Pool sizing: every process performs its DB work sequentially (the
+        # main poller runs one query per poll cycle, each worker one commit
+        # at a time), so one connection is enough for the steady state. The
+        # maximum is a safety margin for transient overlap and is tunable
+        # through configuration/environment variables.
+        self._pool_min_size = int(cfg.db.get("pool_min_size", 1))
+        self._pool_max_size = int(cfg.db.get("pool_max_size", 10))
+        self._pool_timeout = float(cfg.db.get("pool_timeout", 30.0))
+        self._pool: AsyncConnectionPool[psycopg.AsyncConnection] | None = None
+
+    def __getstate__(self):
+        # A pool holds live connections, threads and background tasks and
+        # cannot be pickled or forked. Every process must open its own pool
+        # by calling `open()` after the process has started.
+        state = self.__dict__.copy()
+        state["_pool"] = None
+        return state
+
+    @property
+    def is_open(self):
+        """Whether the connection pool has been opened."""
+        return self._pool is not None
+
+    async def open(self):
+        """Create and open the connection pool. Idempotent.
+
+        The pool is opened with ``wait=False``: connections are established
+        lazily by the pool's background tasks, so a database that is not up
+        yet at startup does not crash the process — calls simply wait (up to
+        ``pool_timeout`` seconds) for a connection and fail individually,
+        preserving the self-healing behaviour of the previous per-call
+        connect pattern.
+        """
+        if self._pool is not None:
+            return
+        pool: AsyncConnectionPool[psycopg.AsyncConnection] = AsyncConnectionPool(
+            conninfo=self._conninfo,
+            min_size=self._pool_min_size,
+            max_size=self._pool_max_size,
+            timeout=self._pool_timeout,
+            configure=self._configure_connection,
+            open=False,
+        )
+        self._pool = pool
+        try:
+            await pool.open(wait=False)
+        except Exception:
+            self._pool = None
+            raise
+
+    async def close(self):
+        """Close the connection pool, releasing every pooled connection."""
+        pool, self._pool = self._pool, None
+        if pool is not None:
+            await pool.close()
+
+    @staticmethod
+    async def _configure_connection(conn: psycopg.AsyncConnection) -> None:
+        # psycopg3 starts an implicit transaction on the first statement, and
+        # `async with pool.connection()` commits it on clean exit and rolls
+        # it back on error. Keep autocommit off so that this matches the
+        # semantics of the old psycopg2 `with connection:` blocks: each
+        # provider call is a single transaction.
+        # NOTE: psycopg_pool 3.3+ requires this callback to be awaitable.
+        conn.autocommit = False
+
+    def _acquire(self) -> AsyncConnectionPool[psycopg.AsyncConnection]:
+        if self._pool is None:
+            raise RuntimeError(
+                "Database connection pool is not open; call open() first"
+            )
+        return self._pool
 
     @staticmethod
     def commit_from_row(row):
@@ -58,7 +138,7 @@ class Postgres(DataProvider):
         )
         return c
 
-    def fetch_commits_in_queue(self):
+    async def fetch_commits_in_queue(self):
         query = (
             "SELECT com.id"
             "     , com.user_email"
@@ -95,17 +175,18 @@ class Postgres(DataProvider):
             " ORDER BY com.commit_time ASC"
         )
 
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, (Commit.STATUS_IN_QUEUE,))
-                    commits = [Postgres.commit_from_row(row) for row in cursor]
-                    for commit in commits:
-                        if commit.fname is not None:
-                            commit.language = language_from_extension(commit.fname)
-                    return commits
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(query, (Commit.STATUS_IN_QUEUE,))
+            commits = []
+            async for row in cursor:
+                commits.append(Postgres.commit_from_row(row))
 
-    def update_commit(self, commit):
+        for commit in commits:
+            if commit.fname is not None:
+                commit.language = language_from_extension(commit.fname)
+        return commits
+
+    async def update_commit(self, commit):
         query = (
             "UPDATE commits SET"
             " user_email = %s,"
@@ -146,12 +227,10 @@ class Postgres(DataProvider):
             compiled_error,  # encoded
             commit.id,
         )
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, data)
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(query, data)
 
-    def store_commit_test_results(self, commit, test_results):
+    async def store_commit_test_results(self, commit, test_results):
         query = (
             "INSERT INTO commits_exercise_cases(commit_id"
             "                                 , exercise_case_id"
@@ -164,37 +243,34 @@ class Postgres(DataProvider):
             "                                 , error)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)"
         )
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    for test_case_result in test_results:
-                        data = (
-                            commit.id,
-                            test_case_result.test_case_id,
-                            test_case_result.cpu_time,
-                            test_case_result.mem_used,  # unused
-                            test_case_result.output,  # unused
-                            test_case_result.output_type,  # unused
-                            test_case_result.status,
-                            test_case_result.status_message,
-                            test_case_result.error,
-                        )  # unused
-                        cursor.execute(query, data)
+        # All rows for a commit are written inside a single transaction: the
+        # `async with pool.connection()` block commits on clean exit and rolls
+        # everything back if any insert fails.
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            for test_case_result in test_results:
+                data = (
+                    commit.id,
+                    test_case_result.test_case_id,
+                    test_case_result.cpu_time,
+                    test_case_result.mem_used,  # unused
+                    test_case_result.output,  # unused
+                    test_case_result.output_type,  # unused
+                    test_case_result.status,
+                    test_case_result.status_message,
+                    test_case_result.error,
+                )  # unused
+                await cursor.execute(query, data)
 
-    def delete_commit_test_results(self, commit):
+    async def delete_commit_test_results(self, commit):
         query = "DELETE FROM commits_exercise_cases WHERE commit_id = %s"
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, (commit.id,))
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(query, (commit.id,))
 
-    def fetch_exercise_files(self, commit):
+    async def fetch_exercise_files(self, commit):
         query = "SELECT path FROM compilation_files WHERE exercise_id = %s"
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    cursor.execute(query, (commit.real_exercise_id,))
-                    return [row[0] for row in cursor]
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(query, (commit.real_exercise_id,))
+            return [row[0] async for row in cursor]
 
     @staticmethod
     def test_case_from_row(row):
@@ -215,7 +291,7 @@ class Postgres(DataProvider):
         )
         return t
 
-    def fetch_test_cases(self, commit):
+    async def fetch_test_cases(self, commit):
         query = (
             "SELECT id"
             "     , exercise_id"
@@ -235,14 +311,14 @@ class Postgres(DataProvider):
             " ORDER BY id"
         )
         files_query = "SELECT path FROM exercise_case_files WHERE exercise_case_id = %s"
-        with contextlib.closing(self._connect()) as connection:
-            with connection:
-                with connection.cursor() as cursor:
-                    # Fetch test case metadata
-                    cursor.execute(query, (commit.real_exercise_id,))
-                    test_cases = [Postgres.test_case_from_row(row) for row in cursor]
-                    # Fetch the list of files of each test case
-                    for test_case in test_cases:
-                        cursor.execute(files_query, (test_case.id,))
-                        test_case.files = [row[0] for row in cursor]
-                    return test_cases
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            # Fetch test case metadata
+            await cursor.execute(query, (commit.real_exercise_id,))
+            test_cases = []
+            async for row in cursor:
+                test_cases.append(Postgres.test_case_from_row(row))
+            # Fetch the list of files of each test case
+            for test_case in test_cases:
+                await cursor.execute(files_query, (test_case.id,))
+                test_case.files = [row[0] async for row in cursor]
+            return test_cases

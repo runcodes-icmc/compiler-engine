@@ -1,3 +1,4 @@
+import asyncio
 import datetime
 import logging
 import os
@@ -138,23 +139,23 @@ class MockDataProvider(rcc.provider.data.DataProvider):
         self.num_calls_fetch_exercise_files = 0
         self.num_calls_fetch_test_cases = 0
 
-    def fetch_commits_in_queue(self):
+    async def fetch_commits_in_queue(self):
         pass
 
-    def update_commit(self, commit):
+    async def update_commit(self, commit):
         self.num_calls_update_commit += 1
 
-    def store_commit_test_results(self, commit, test_results):
+    async def store_commit_test_results(self, commit, test_results):
         self.num_calls_store_commit_test_results += 1
 
-    def delete_commit_test_results(self, commit):
+    async def delete_commit_test_results(self, commit):
         self.num_calls_delete_commit_test_results += 1
 
-    def fetch_exercise_files(self, commit):
+    async def fetch_exercise_files(self, commit):
         self.num_calls_fetch_exercise_files += 1
         return []
 
-    def fetch_test_cases(self, commit):
+    async def fetch_test_cases(self, commit):
         test_cases = []
         for test_case_metadata in commit.test_cases:
             test_case = TestCase(
@@ -246,5 +247,5 @@ class TestEngineKnownIssues(unittest.TestCase):
             commit = build_commit(metadata)
             with self.subTest(name=commit.user_email):
                 cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-                rcc.engine.process_commit(self.data_prov, commit, cfg)
+                asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
                 self.assertEqual(commit.status, metadata["expected_status"])

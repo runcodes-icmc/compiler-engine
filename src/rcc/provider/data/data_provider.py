@@ -1,18 +1,30 @@
 class DataProvider(object):
-    def fetch_commits_in_queue(self):
+    """Abstract interface for data providers.
+
+    Implementations access the database asynchronously and hold a per-process
+    connection pool that must be opened before use (and closed on shutdown).
+    """
+
+    async def open(self):
+        """Open any process-local resources (e.g. a connection pool)."""
+
+    async def close(self):
+        """Close any process-local resources (e.g. a connection pool)."""
+
+    async def fetch_commits_in_queue(self):
         raise NotImplementedError()
 
-    def update_commit(self, _commit):
+    async def update_commit(self, _commit):
         raise NotImplementedError()
 
-    def store_commit_test_results(self, _commit, _test_results):
+    async def store_commit_test_results(self, _commit, _test_results):
         raise NotImplementedError()
 
-    def delete_commit_test_results(self, _commit):
+    async def delete_commit_test_results(self, _commit):
         raise NotImplementedError()
 
-    def fetch_exercise_files(self, _commit):
+    async def fetch_exercise_files(self, _commit):
         raise NotImplementedError()
 
-    def fetch_test_cases(self, _commit):
+    async def fetch_test_cases(self, _commit):
         raise NotImplementedError()

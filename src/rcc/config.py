@@ -63,6 +63,9 @@ class EnvConfig(Config):
                 "port": int(os.environ.get("RUNCODES_DB_PORT", "5432")),
                 "username": os.environ.get("RUNCODES_DB_USERNAME", "runcodes"),
                 "password": os.environ.get("RUNCODES_DB_PASSWORD", "asdasd33"),
+                "pool_min_size": int(os.environ.get("RUNCODES_DB_POOL_MIN_SIZE", "1")),
+                "pool_max_size": int(os.environ.get("RUNCODES_DB_POOL_MAX_SIZE", "10")),
+                "pool_timeout": float(os.environ.get("RUNCODES_DB_POOL_TIMEOUT", "30")),
             },
             "s3": {
                 "region": os.environ.get("RUNCODES_S3_REGION", "sa-east-1"),

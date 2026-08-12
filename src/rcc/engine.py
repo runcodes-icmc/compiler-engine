@@ -30,7 +30,7 @@ def set_extension(commit):
     commit.extension = extension
 
 
-def copy_source_files(data_provider, storage_provider, commit, base_dir):
+async def copy_source_files(data_provider, storage_provider, commit, base_dir):
     cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
     src_dir = os.path.join(base_dir, cfg.src_dir)
     os.makedirs(src_dir, DEFAULT_MKDIR_PERMISSIONS)
@@ -50,7 +50,7 @@ def copy_source_files(data_provider, storage_provider, commit, base_dir):
     commit.is_compilable = rcc.util.is_compilable(commit.extension)
 
     # Copy files uploaded with exercise
-    fnames = data_provider.fetch_exercise_files(commit)
+    fnames = await data_provider.fetch_exercise_files(commit)
     for fname in fnames:
         fname = os.path.join(str(commit.real_exercise_id), fname)
         destination = os.path.join(src_dir, os.path.basename(fname))
@@ -174,7 +174,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             )
 
             commit.status = Commit.STATUS_COMPILING
-            data_provider.update_commit(commit)
+            await data_provider.update_commit(commit)
 
             # Compilation done
             await expect_message(
@@ -202,7 +202,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
         commit.is_compiled = True
 
     commit.compilation_finished_time = datetime.datetime.now()
-    data_provider.update_commit(commit)
+    await data_provider.update_commit(commit)
 
     if commit.status != Commit.STATUS_ERROR:
         try:
@@ -212,7 +212,7 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             await expect_message(container_stdout, "run.start", timeout)
 
             commit.status = Commit.STATUS_RUNNING
-            data_provider.update_commit(commit)
+            await data_provider.update_commit(commit)
 
             # Test cases execution done
             await expect_message(container_stdout, "run.done", timeout)
@@ -232,19 +232,16 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             logger.error("Container removal failed", exc_info=True)
 
 
-def run_tests(
+async def run_tests(
     data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
 ):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        # No event loop in current thread, create a new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+    """Run the submitted code in a container and collect the test results.
 
-    run_task = run(data_provider, commit, test_cases, base_dir, remote_dir)
-    loop.run_until_complete(run_task)
-    # loop.close()
+    Runs on the caller's event loop (previously a fresh event loop was created
+    per commit): the container is executed while commit status updates are
+    pushed to the (async) data provider.
+    """
+    await run(data_provider, commit, test_cases, base_dir, remote_dir)
 
     if commit.status == Commit.STATUS_ERROR:
         return []
@@ -311,7 +308,12 @@ def cleanup_tests(base_dir):
         shutil.rmtree(base_dir, onexc=rmtree_handler)
 
 
-def process_commit(data_provider, commit, cfg=None):
+async def process_commit(data_provider, commit, cfg=None):
+    """Process a single commit: compile it, run its test cases, store results.
+
+    Fully async: every interaction with the data provider is awaited. Runs on
+    the caller's event loop (the worker's main loop or a test runner).
+    """
     if cfg is None:
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
@@ -327,27 +329,27 @@ def process_commit(data_provider, commit, cfg=None):
     except Exception:
         logger.error("[{c.id}] Storage provider error".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
-        data_provider.update_commit(commit)
+        await data_provider.update_commit(commit)
         return
 
     try:
-        test_cases = data_provider.fetch_test_cases(commit)
+        test_cases = await data_provider.fetch_test_cases(commit)
     except Exception:
         logger.error(
             "[{c.id}] Failed to fetch test cases".format(c=commit), exc_info=True
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
-        data_provider.update_commit(commit)
+        await data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
             cleanup_tests(os.path.join(cfg.exec_dir, "commit_{}".format(commit.id)))
         return
 
     # Delete results already produced by this commit, if any
-    data_provider.delete_commit_test_results(commit)
+    await data_provider.delete_commit_test_results(commit)
     commit.reset()
     commit.status = Commit.STATUS_PROCESSING
     commit.compilation_started_time = datetime.datetime.now()
-    data_provider.update_commit(commit)
+    await data_provider.update_commit(commit)
 
     logger.debug("[{c.id}] Preparing to run tests".format(c=commit))
     try:
@@ -356,25 +358,25 @@ def process_commit(data_provider, commit, cfg=None):
         cleanup_tests(base_dir)
         os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
         create_container_cfg_file(commit, test_cases, base_dir)
-        copy_source_files(data_provider, storage_provider, commit, base_dir)
+        await copy_source_files(data_provider, storage_provider, commit, base_dir)
         copy_test_case_files(storage_provider, test_cases, base_dir)
     except Exception:
         logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
-        data_provider.update_commit(commit)
+        await data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
             cleanup_tests(base_dir)
         return
 
     logger.debug("[{c.id}] Running tests".format(c=commit))
     try:
-        test_results = run_tests(
+        test_results = await run_tests(
             data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
         )
     except Exception:
         logger.error("[{c.id}] Failed to run tests".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
-        data_provider.update_commit(commit)
+        await data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
             cleanup_tests(base_dir)
         return
@@ -383,8 +385,8 @@ def process_commit(data_provider, commit, cfg=None):
     logger.debug("[{c.id}] Storing results".format(c=commit))
     try:
         compute_score(commit, test_cases, test_results)
-        data_provider.update_commit(commit)
-        data_provider.store_commit_test_results(commit, test_results)
+        await data_provider.update_commit(commit)
+        await data_provider.store_commit_test_results(commit, test_results)
         if len(test_results) > 0:
             output_fname = prepare_output_file(commit, base_dir)
             storage_provider.store_commit_output(commit, output_fname)
@@ -397,14 +399,21 @@ def process_commit(data_provider, commit, cfg=None):
             exc_info=True,
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
-        data_provider.update_commit(commit)
+        await data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
             cleanup_tests(base_dir)
         return
     logger.debug("[{c.id}] Commit processing done".format(c=commit))
 
 
-def process_commits(data_provider, commit_queue, cfg=None):
+async def process_commits(data_provider, commit_queue, cfg=None):
+    """Worker main loop: pull commits from the queue and process them.
+
+    Runs on a dedicated event loop inside the worker process. The process's
+    database connection pool is opened here (one pool per process) and closed
+    when the worker stops. ``queue.get`` is offloaded to a thread so that the
+    event loop stays responsive while waiting for work.
+    """
     # Set up logging for worker process
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
 
@@ -434,28 +443,48 @@ def process_commits(data_provider, commit_queue, cfg=None):
         SystemError,
     )
 
-    with rcc.util.UninterruptibleContext():
-        while True:
-            try:
-                commit = commit_queue.get()
+    try:
+        # Open this process's own connection pool (pools cannot be shared
+        # across processes, so every worker opens its own).
+        await data_provider.open()
+    except Exception:
+        logger.error("Failed to open database connection pool", exc_info=True)
+        raise
 
-                if commit is None:
-                    # Hint to stop processing, mark empty task as done (in finally block) and bail
+    try:
+        with rcc.util.UninterruptibleContext():
+            while True:
+                try:
+                    commit = await asyncio.to_thread(commit_queue.get)
+
+                    if commit is None:
+                        # Hint to stop processing, mark empty task as done (in finally block) and bail
+                        break
+
+                    await process_commit(data_provider, commit, cfg)
+
+                # If exception should stop the worker
+                except non_retryable_exceptions as e:
+                    logger.warning(f"Caught non-retryable exception: {e}")
                     break
 
-                process_commit(data_provider, commit, cfg)
+                # If the worker should retry
+                except Exception as e:
+                    logger.warning(f"Caught retryable exception: {e}", exc_info=True)
 
-            # If exception should stop the worker
-            except non_retryable_exceptions as e:
-                logger.warning(f"Caught non-retryable exception: {e}")
-                break
-
-            # If the worker should retry
-            except Exception as e:
-                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
-
-            # Marks task as done
-            finally:
-                commit_queue.task_done()
+                # Marks task as done
+                finally:
+                    commit_queue.task_done()
+    finally:
+        await data_provider.close()
 
     logger.debug("Worker stopped")
+
+
+def run_worker(data_provider, commit_queue, cfg=None):
+    """Sync entry point for the worker ``multiprocessing.Process`` target.
+
+    Each worker process starts its own event loop (and, through it, its own
+    database connection pool).
+    """
+    asyncio.run(process_commits(data_provider, commit_queue, cfg))

@@ -9,7 +9,10 @@
         "port": 5432,
         "name": "dbname",
         "username": "user",
-        "password": "pass"
+        "password": "pass",
+        "pool_min_size": 1,
+        "pool_max_size": 10,
+        "pool_timeout": 30
     },
 
     "s3": {
