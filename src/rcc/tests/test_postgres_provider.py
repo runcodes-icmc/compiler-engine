@@ -9,6 +9,7 @@ row mapping without external services.
 
 import base64
 import datetime
+import inspect
 import unittest
 from typing import Any, ClassVar, cast
 from unittest import mock
@@ -24,10 +25,13 @@ from rcc.provider.data.postgres import Postgres
 class FakeCursor:
     """Imitates ``psycopg.AsyncCursor``: execute + async iteration support."""
 
-    def __init__(self, result_sets=None, error=None):
+    def __init__(self, result_sets=None, error=None, rowcounts=None):
         # One list of rows per expected execute() call, in order.
         self.result_sets = list(result_sets or [])
         self.error = error
+        # One rowcount value per expected execute() call, in order (default 0).
+        self.rowcounts = list(rowcounts or [])
+        self.rowcount = 0
         self.executed = []
         self._iter = iter([])
 
@@ -41,6 +45,7 @@ class FakeCursor:
         if self.error is not None:
             raise self.error
         self.executed.append((query, params))
+        self.rowcount = self.rowcounts.pop(0) if self.rowcounts else 0
         rows = self.result_sets.pop(0) if self.result_sets else []
         self._iter = iter(rows)
 
@@ -65,6 +70,11 @@ class FakeConnection:
 
     def cursor(self):
         return self._cursor
+
+    async def set_autocommit(self, value):
+        # psycopg3 async connections expose autocommit through this awaitable
+        # setter (the property itself is read-only).
+        self.autocommit = value
 
     async def __aenter__(self):
         return self
@@ -240,7 +250,23 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
     async def test_configure_callback_disables_autocommit(self):
         conn: Any = FakeConnection(FakeCursor())
         await Postgres._configure_connection(conn)
+        # Must go through the async setter, not the read-only property.
         self.assertFalse(conn.autocommit)
+
+    async def test_async_autocommit_api_contract(self):
+        # Guard against assigning to `conn.autocommit` directly: on psycopg3
+        # async connections the property setter raises AttributeError, which
+        # would kill every pooled connection at the configure step and
+        # produce the PoolTimeout storms seen in production logs. The
+        # configure callback must use the awaitable `set_autocommit()`.
+        self.assertTrue(
+            inspect.iscoroutinefunction(psycopg.AsyncConnection.set_autocommit)
+        )
+        # Exercise the guard on a real AsyncConnection without touching the
+        # network (__new__ skips __init__, so no server interaction).
+        conn = psycopg.AsyncConnection.__new__(psycopg.AsyncConnection)
+        with self.assertRaises(AttributeError):
+            conn.autocommit = False
 
     async def test_pickling_drops_pool(self):
         import pickle
@@ -396,7 +422,12 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
             0.5,  # abs_error
             datetime.datetime(2026, 1, 2),  # last_update
         ]
-        cursor = FakeCursor(result_sets=[[case_row], [("in.txt",), ("data.bin",)]])
+        cursor = FakeCursor(
+            result_sets=[
+                [case_row],
+                [(101, "in.txt"), (101, "data.bin")],
+            ]
+        )
         provider, _ = self._provider_with(FakeConnection(cursor))
         commit = make_commit()
 
@@ -409,7 +440,52 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(test_case.files, ["in.txt", "data.bin"])
         self.assertEqual(len(cursor.executed), 2)
         self.assertEqual(cursor.executed[0][1], (commit.real_exercise_id,))
-        self.assertEqual(cursor.executed[1][1], (101,))
+        # The per-case N+1 loop is replaced by one batched query over the ids.
+        self.assertEqual(cursor.executed[1][1], ([101],))
+
+    async def test_fetch_test_cases_batches_files_across_cases(self):
+        def case_row(case_id):
+            return [
+                case_id,
+                5,
+                TestCase.IO_TYPE_TEXT,
+                TestCase.IO_TYPE_TEXT,
+                False,
+                False,
+                0,
+                5,
+                0,
+                False,
+                0,
+                0.0,
+                None,
+            ]
+
+        cursor = FakeCursor(
+            result_sets=[
+                [case_row(101), case_row(102)],
+                # Interleaved rows: attribution must preserve per-case order.
+                [(101, "a.in"), (102, "b.in"), (101, "data.bin")],
+            ]
+        )
+        provider, _ = self._provider_with(FakeConnection(cursor))
+
+        test_cases = await provider.fetch_test_cases(make_commit())
+
+        self.assertEqual([tc.id for tc in test_cases], [101, 102])
+        self.assertEqual(test_cases[0].files, ["a.in", "data.bin"])
+        self.assertEqual(test_cases[1].files, ["b.in"])
+        self.assertEqual(len(cursor.executed), 2)
+        self.assertEqual(cursor.executed[1][1], ([101, 102],))
+
+    async def test_fetch_test_cases_skips_files_query_without_cases(self):
+        cursor = FakeCursor(result_sets=[[]])
+        provider, _ = self._provider_with(FakeConnection(cursor))
+
+        test_cases = await provider.fetch_test_cases(make_commit())
+
+        self.assertEqual(test_cases, [])
+        self.assertEqual(len(cursor.executed), 1)
 
     async def test_fetch_exercise_files_reads_rows(self):
         cursor = FakeCursor(result_sets=[[("Makefile",), ("util.c",)]])
@@ -419,6 +495,63 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(fnames, ["Makefile", "util.c"])
         self.assertEqual(cursor.executed[0][1], (7,))
+
+    async def test_claim_commit_flips_in_queue_to_processing(self):
+        cursor = FakeCursor(rowcounts=[1])
+        conn = FakeConnection(cursor)
+        provider, _ = self._provider_with(conn)
+        commit = make_commit()
+
+        claimed = await provider.claim_commit(commit)
+
+        self.assertTrue(claimed)
+        self.assertTrue(conn.committed)
+        ((query, params),) = cursor.executed
+        self.assertIn("UPDATE commits", query)
+        self.assertIn("status = %s", query)
+        self.assertIn("WHERE id = %s AND status = %s", query)
+        # The DB column is `compilation_started` (no `_time` suffix): a wrong
+        # column name would fail every claim against the real schema.
+        self.assertIn("compilation_started = %s", query)
+        self.assertNotIn("compilation_started_time", query)
+        status, started, commit_id, expected_status = params
+        self.assertEqual(status, Commit.STATUS_PROCESSING)
+        self.assertIsInstance(started, datetime.datetime)
+        self.assertEqual(commit_id, commit.id)
+        self.assertEqual(expected_status, Commit.STATUS_IN_QUEUE)
+
+    async def test_claim_commit_loses_when_already_taken(self):
+        # Zero rows updated: the commit is no longer IN_QUEUE.
+        cursor = FakeCursor(rowcounts=[0])
+        provider, _ = self._provider_with(FakeConnection(cursor))
+
+        claimed = await provider.claim_commit(make_commit())
+
+        self.assertFalse(claimed)
+        ((_query, params),) = cursor.executed
+        self.assertEqual(params[0], Commit.STATUS_PROCESSING)
+        self.assertEqual(params[2], 42)
+        self.assertEqual(params[3], Commit.STATUS_IN_QUEUE)
+
+    async def test_release_commit_restores_in_queue_state(self):
+        cursor = FakeCursor(rowcounts=[1])
+        conn = FakeConnection(cursor)
+        provider, _ = self._provider_with(conn)
+        commit = make_commit()
+
+        await provider.release_commit(commit)
+
+        self.assertTrue(conn.committed)
+        ((query, params),) = cursor.executed
+        self.assertIn("UPDATE commits", query)
+        self.assertIn("compilation_started = NULL", query)
+        self.assertNotIn("compilation_started_time", query)
+        self.assertEqual(
+            params, (Commit.STATUS_IN_QUEUE, commit.id, Commit.STATUS_PROCESSING)
+        )
+        self.assertEqual(
+            params, (Commit.STATUS_IN_QUEUE, commit.id, Commit.STATUS_PROCESSING)
+        )
 
 
 if __name__ == "__main__":

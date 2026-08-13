@@ -1,6 +1,7 @@
 from __future__ import unicode_literals
 
 import base64
+import datetime
 
 import psycopg
 import psycopg.conninfo
@@ -98,8 +99,9 @@ class Postgres(DataProvider):
         # it back on error. Keep autocommit off so that this matches the
         # semantics of the old psycopg2 `with connection:` blocks: each
         # provider call is a single transaction.
-        # NOTE: psycopg_pool 3.3+ requires this callback to be awaitable.
-        conn.autocommit = False
+        # NOTE: on async connections `autocommit` is a read-only property;
+        # it must be toggled through the awaitable `set_autocommit()` method.
+        await conn.set_autocommit(False)
 
     def _acquire(self) -> AsyncConnectionPool[psycopg.AsyncConnection]:
         if self._pool is None:
@@ -266,6 +268,54 @@ class Postgres(DataProvider):
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
             await cursor.execute(query, (commit.id,))
 
+    async def claim_commit(self, commit):
+        """Atomically mark an ``STATUS_IN_QUEUE`` commit as PROCESSING.
+
+        The poller can enqueue the same commit more than once (a commit
+        stays IN_QUEUE until a worker takes it, e.g. while it waits in the
+        bounded task queue), so several workers may pull copies of it. The
+        conditional UPDATE makes the claim exclusive: exactly one worker
+        flips the status and gets ``True``; every other copy's update
+        matches zero rows and gets ``False``. ``compilation_started``
+        is set here so a PROCESSING row is never observed without a start
+        time (the worker later refreshes it with the same meaning).
+        """
+        query = (
+            "UPDATE commits"
+            " SET status = %s, compilation_started = %s"
+            " WHERE id = %s AND status = %s"
+        )
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(
+                query,
+                (
+                    Commit.STATUS_PROCESSING,
+                    datetime.datetime.now(),
+                    commit.id,
+                    Commit.STATUS_IN_QUEUE,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    async def release_commit(self, commit):
+        """Return a claimed commit to the queue (PROCESSING -> IN_QUEUE).
+
+        Only called by the worker that holds the claim, after a retryable
+        failure. The status guard keeps a stale release from clobbering a
+        final status written in the meantime; the start time is cleared so
+        the row is restored to the same state as a fresh queue entry.
+        """
+        query = (
+            "UPDATE commits"
+            " SET status = %s, compilation_started = NULL"
+            " WHERE id = %s AND status = %s"
+        )
+        async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            await cursor.execute(
+                query,
+                (Commit.STATUS_IN_QUEUE, commit.id, Commit.STATUS_PROCESSING),
+            )
+
     async def fetch_exercise_files(self, commit):
         query = "SELECT path FROM compilation_files WHERE exercise_id = %s"
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
@@ -310,15 +360,34 @@ class Postgres(DataProvider):
             " WHERE exercise_id = %s"
             " ORDER BY id"
         )
-        files_query = "SELECT path FROM exercise_case_files WHERE exercise_case_id = %s"
+        # One batched query for every test case's files instead of one query
+        # per test case (the old N+1 pattern). psycopg3 adapts the list of
+        # ids to a Postgres array for ``= ANY(%s)``. Rows are attributed to
+        # their case by ``exercise_case_id``, preserving per-case file order:
+        # the single scan returns rows in the same (per-case) order the old
+        # per-case queries observed. File order is not semantically
+        # significant anyway (files are addressed by name).
+        files_query = (
+            "SELECT exercise_case_id, path"
+            " FROM exercise_case_files"
+            " WHERE exercise_case_id = ANY(%s)"
+        )
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
             # Fetch test case metadata
             await cursor.execute(query, (commit.real_exercise_id,))
             test_cases = []
             async for row in cursor:
                 test_cases.append(Postgres.test_case_from_row(row))
-            # Fetch the list of files of each test case
-            for test_case in test_cases:
-                await cursor.execute(files_query, (test_case.id,))
-                test_case.files = [row[0] async for row in cursor]
+            # Fetch the list of files of every test case in a single round
+            # trip (skipped when the exercise has no test cases: an empty
+            # array would be a pointless round trip).
+            if test_cases:
+                await cursor.execute(
+                    files_query, ([test_case.id for test_case in test_cases],)
+                )
+                files_by_case = {}
+                async for row in cursor:
+                    files_by_case.setdefault(row[0], []).append(row[1])
+                for test_case in test_cases:
+                    test_case.files = files_by_case.get(test_case.id, [])
             return test_cases

@@ -28,3 +28,20 @@ class DataProvider(object):
 
     async def fetch_test_cases(self, _commit):
         raise NotImplementedError()
+
+    async def claim_commit(self, _commit) -> bool:
+        """Atomically take an ``STATUS_IN_QUEUE`` commit for processing.
+
+        Return ``True`` if this caller won the commit, ``False`` if another
+        worker had already taken it. The default implementation always
+        claims: providers without real locking semantics (such as test
+        doubles) never reject a commit.
+        """
+        return True
+
+    async def release_commit(self, _commit):
+        """Return a claimed commit to the queue after a retryable failure.
+
+        Only the worker that holds the claim may call this. The default is a
+        no-op for providers without locking semantics.
+        """

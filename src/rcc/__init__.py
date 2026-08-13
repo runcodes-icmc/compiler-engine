@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import multiprocessing as mp
 import sys
+import time
 
 from six.moves import range
 
@@ -56,6 +57,26 @@ def setup_logger(name, log_config):
 
 def commit_filter(_):
     return True
+
+
+def _select_new_commits(commits, recently_enqueued, suppression):
+    """Filter out recently enqueued commits and prune stale tracking entries.
+
+    ``recently_enqueued`` maps a commit id to the ``time.monotonic()`` value
+    at which it was put on the task queue. An entry is pruned when:
+
+    * its commit left the ``STATUS_IN_QUEUE`` fetch — a worker claimed it, so
+      a commit released back to the queue after a retryable failure is
+      re-enqueued immediately; or
+    * ``suppression`` seconds elapsed — so a commit whose worker died between
+      pulling and claiming it is retried instead of being suppressed forever.
+    """
+    fetched_ids = {commit.id for commit in commits}
+    cutoff = time.monotonic() - suppression
+    for commit_id in list(recently_enqueued):
+        if commit_id not in fetched_ids or recently_enqueued[commit_id] < cutoff:
+            del recently_enqueued[commit_id]
+    return [commit for commit in commits if commit.id not in recently_enqueued]
 
 
 async def _stop_workers(engine_workers, task_queue, logger):
@@ -144,10 +165,28 @@ async def main():
             # and are retried
             await data_provider.open()
 
+            # Suppress duplicate enqueueing: the poller re-fetches every
+            # commit that is still STATUS_IN_QUEUE on each cycle, so without
+            # this a commit waiting in the queue for a free worker would be
+            # put on it again and again. Worker-side claiming already makes
+            # such duplicates harmless; this only avoids wasting queue
+            # capacity and claim round trips on them. See
+            # :func:`_select_new_commits` for the pruning rules.
+            recently_enqueued = {}
+            commit_suppression = float(
+                cfg.get(
+                    "commit_enqueue_suppression",
+                    rcc.config.DEFAULT_COMMIT_ENQUEUE_SUPPRESSION,
+                )
+            )
+
             while True:
                 try:
                     commits = await data_provider.fetch_commits_in_queue()
                     commits = list(filter(commit_filter, commits))
+                    commits = _select_new_commits(
+                        commits, recently_enqueued, commit_suppression
+                    )
                 except Exception:
                     logger.error("Could not fetch commits", exc_info=True)
                     commits = []
@@ -157,6 +196,7 @@ async def main():
                         # the loop stalls here while the workers drain, so
                         # there is no need for a join() barrier anymore.
                         await asyncio.to_thread(task_queue.put, commit)
+                        recently_enqueued[commit.id] = time.monotonic()
                     sleeper.reset()
                 await asyncio.sleep(sleeper.sleep_time())
         except KeyboardInterrupt:

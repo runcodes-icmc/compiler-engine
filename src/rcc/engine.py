@@ -34,6 +34,12 @@ QUEUE_GET_POLL_TIMEOUT = 1.0
 # it never blocks process exit.
 CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 
+# Upper bound for the number of concurrent S3 downloads in the prefetch phase.
+# The actual bound mirrors ``concurrency_per_worker`` (the number of commits a
+# worker processes at once), capped here so a single commit with many
+# exercise/test-case files cannot open an unbounded number of connections.
+PREFETCH_MAX_CONCURRENT_DOWNLOADS = 8
+
 
 def set_extension(commit):
     _, extension = os.path.splitext(commit.fname)
@@ -41,14 +47,76 @@ def set_extension(commit):
     commit.extension = extension
 
 
-async def copy_source_files(data_provider, storage_provider, commit, base_dir):
+def _raise_first_error(results):
+    """Re-raise the first exception in a ``gather(return_exceptions=True)`` list.
+
+    Used after each concurrent download batch: every in-flight download has
+    finished by the time this is called, so the caller's cleanup (which may
+    delete ``base_dir``) can never race a worker thread still writing into it.
+    """
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+
+
+def _mark_task_done(task):
+    """Retrieve a finished task's outcome (suppress 'never retrieved' warnings).
+
+    Used on background tasks whose result may never be awaited on some paths
+    (e.g. when the enclosing coroutine is cancelled mid-prefetch). Awaiting
+    the task later still yields the same result/exception.
+    """
+    if not task.cancelled():
+        task.exception()
+
+
+async def _await_task(task):
+    """Await ``task`` and return its exception, or ``None`` on success.
+
+    Non-Exception BaseExceptions (e.g. CancelledError) propagate, so a
+    cancellation is never mistaken for a failed download.
+    """
+    try:
+        await task
+    except Exception as error:
+        return error
+    return None
+
+
+async def download_commit_file(storage_provider, commit, base_dir):
+    """Download the commit source file into ``<base_dir>/<cfg.src_dir>``.
+
+    Split out of :func:`copy_source_files` so the download can start
+    concurrently with the prefetch database queries in :func:`process_commit`.
+    The directory is created here (same path and permissions as before, just
+    earlier, because the download needs it); the zip extraction in
+    :func:`copy_source_files` still runs only after this completes.
+    """
     cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+    if cfg is None:
+        raise RuntimeError("No default configuration registered")
     src_dir = os.path.join(base_dir, cfg.src_dir)
     os.makedirs(src_dir, DEFAULT_MKDIR_PERMISSIONS)
-
-    # Copy commit files (boto3 downloads run in a worker thread)
     destination = os.path.join(src_dir, os.path.basename(commit.fname))
+    # boto3 download runs in a worker thread
     await asyncio.to_thread(storage_provider.fetch_commit_file, commit, destination)
+
+
+async def copy_source_files(
+    data_provider, storage_provider, commit, base_dir, semaphore
+):
+    """Copy the exercise's extra source files into ``<base_dir>/<cfg.src_dir>``.
+
+    The commit file itself was already downloaded concurrently with the
+    prefetch queries (see :func:`download_commit_file`), so the zip handling
+    below is unchanged. Exercise-file downloads are independent of each other
+    and run concurrently, bounded by ``semaphore``.
+    """
+    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+    if cfg is None:
+        raise RuntimeError("No default configuration registered")
+    src_dir = os.path.join(base_dir, cfg.src_dir)
+    destination = os.path.join(src_dir, os.path.basename(commit.fname))
 
     # Add info about file extension and whether the submission is compilable
     set_extension(commit)
@@ -62,24 +130,50 @@ async def copy_source_files(data_provider, storage_provider, commit, base_dir):
 
     # Copy files uploaded with exercise
     fnames = await data_provider.fetch_exercise_files(commit)
-    for fname in fnames:
-        fname = os.path.join(str(commit.real_exercise_id), fname)
-        destination = os.path.join(src_dir, os.path.basename(fname))
-        await asyncio.to_thread(
-            storage_provider.fetch_exercise_file, fname, destination
-        )
+
+    async def copy_exercise_file(fname):
+        source = os.path.join(str(commit.real_exercise_id), fname)
+        file_destination = os.path.join(src_dir, os.path.basename(fname))
+        async with semaphore:
+            await asyncio.to_thread(
+                storage_provider.fetch_exercise_file, source, file_destination
+            )
+
+    results = await asyncio.gather(
+        *(copy_exercise_file(fname) for fname in fnames), return_exceptions=True
+    )
+    _raise_first_error(results)
 
 
-def copy_test_case_files(storage_provider, test_cases, base_dir):
-    for test_case in test_cases:
-        # Copy test case input file
+async def copy_test_case_files(storage_provider, test_cases, base_dir, semaphore):
+    """Download every test case's input and additional files concurrently.
+
+    Each test case's downloads are independent of the others', so one task per
+    test case runs in parallel, bounded by ``semaphore``. Directory creation
+    stays per test case, right before that case's additional files are
+    downloaded, exactly where it was in the sequential version.
+    """
+
+    async def copy_one(test_case):
+        # Copy test case input file (boto3 call in a worker thread)
         dest = os.path.join(base_dir, "{}.in".format(test_case.id))
-        storage_provider.fetch_test_case_input_file(test_case, dest)
+        async with semaphore:
+            await asyncio.to_thread(
+                storage_provider.fetch_test_case_input_file, test_case, dest
+            )
 
         # Copy additional files uploaded to this test case
         test_case_dir = os.path.join(base_dir, "test_{}".format(test_case.id))
         os.makedirs(test_case_dir, DEFAULT_MKDIR_PERMISSIONS)
-        storage_provider.fetch_test_case_files(test_case, test_case_dir)
+        async with semaphore:
+            await asyncio.to_thread(
+                storage_provider.fetch_test_case_files, test_case, test_case_dir
+            )
+
+    results = await asyncio.gather(
+        *(copy_one(test_case) for test_case in test_cases), return_exceptions=True
+    )
+    _raise_first_error(results)
 
 
 def create_container_cfg_file(commit, test_cases, base_dir):
@@ -448,9 +542,18 @@ async def process_commit(data_provider, commit, cfg=None):
 
     Fully async: every interaction with the data provider is awaited. Runs on
     the caller's event loop (the worker's main loop or a test runner).
+
+    The prefetch phase overlaps its independent IO so the (much slower)
+    container phase starts as soon as possible: fetching the test cases,
+    deleting stale results and downloading the commit source file all start
+    together, and the per-exercise/per-test-case S3 downloads run
+    concurrently behind a semaphore.
     """
     if cfg is None:
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+    if cfg is None:
+        # No configuration was passed and none is registered.
+        raise RuntimeError("No default configuration registered")
     logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
     logger.debug(
         "[{c.id}]"
@@ -467,20 +570,114 @@ async def process_commit(data_provider, commit, cfg=None):
         await data_provider.update_commit(commit)
         return
 
+    base_dir = os.path.join(cfg.exec_dir, "commit_{}".format(commit.id))
+    remote_dir = os.path.join(cfg.exec_dir_remote, "commit_{}".format(commit.id))
+
+    # Bound for the prefetch S3 downloads: mirror the per-worker commit
+    # concurrency so a worker never opens more simultaneous downloads than it
+    # has in-flight commits, capped at a sane small maximum (and never zero,
+    # which would deadlock every download).
+    concurrency = int(
+        cfg.get("concurrency_per_worker", rcc.config.DEFAULT_CONCURRENCY_PER_WORKER)
+    )
+    download_semaphore = asyncio.Semaphore(
+        max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
+    )
+
+    # Remove leftovers from a previous attempt and create the work directory
+    # BEFORE any prefetch download starts, so this cleanup can never delete a
+    # file the prefetch just wrote. This used to run inside the "prepare
+    # runs" block below; it keeps that block's error handling (the same log
+    # line, STATUS_INTERNAL_ERROR transition and cleanup behaviour).
     try:
-        test_cases = await data_provider.fetch_test_cases(commit)
+        cleanup_tests(base_dir)
+        os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
     except Exception:
+        logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
+        commit.reset()
+        commit.status = Commit.STATUS_INTERNAL_ERROR
+        await data_provider.update_commit(commit)
+        if cfg.cleanup_on_error:
+            cleanup_tests(base_dir)
+        return
+
+    # ---- Prefetch phase: overlap the independent IO ------------------------
+    #
+    # Three operations do not depend on each other and start together:
+    #   * fetch_test_cases(commit)            - DB read; own pool connection
+    #   * delete_commit_test_results(commit)  - DB write; own pool connection
+    #                                           (each provider call keeps its
+    #                                           own transaction)
+    #   * the commit source file download     - S3, in a worker thread
+    #
+    # Ordering guarantees kept from the sequential version:
+    #   * the DB pair is awaited FIRST and commit.reset()/STATUS_PROCESSING
+    #     is written as soon as it completes. The S3 download must never
+    #     delay that write: the poller re-enqueues every commit it still
+    #     sees as STATUS_IN_QUEUE, so a slow download would otherwise leave
+    #     the commit in the queue for the whole download time and several
+    #     workers would process copies of it concurrently (colliding on the
+    #     same base_dir);
+    #   * delete_commit_test_results still finishes before the
+    #     STATUS_PROCESSING update (they touch different tables, but a
+    #     crash between the two must not leave a commit marked PROCESSING
+    #     with stale results);
+    #   * the download's failure surfaces later through the original
+    #     "prepare runs" error path, exactly where the sequential version
+    #     raised it.
+    async def fetch_commit_file():
+        await download_commit_file(storage_provider, commit, base_dir)
+
+    # The download runs concurrently with the DB pair; its outcome is
+    # awaited after the STATUS_PROCESSING write (see above).
+    download_task = asyncio.create_task(fetch_commit_file())
+    # Every path below awaits (or cancels) this task; the done callback only
+    # guarantees the outcome is retrieved on the paths that never do (e.g.
+    # process_commit cancelled mid-prefetch), avoiding 'exception was never
+    # retrieved' warnings.
+    download_task.add_done_callback(_mark_task_done)
+
+    test_cases, delete_error = await asyncio.gather(
+        data_provider.fetch_test_cases(commit),
+        data_provider.delete_commit_test_results(commit),
+        return_exceptions=True,
+    )
+
+    # A non-Exception BaseException (e.g. CancelledError) must never be
+    # treated as a provider failure: propagate it unchanged.
+    if isinstance(test_cases, BaseException) and not isinstance(test_cases, Exception):
+        download_task.cancel()
+        raise test_cases
+    if isinstance(test_cases, Exception):
+        # The delete and the download ran concurrently with the failed
+        # fetch; wait for the download (so the cleanup below cannot race its
+        # worker thread) and log any failure, so nothing is silently
+        # swallowed.
+        download_error = await _await_task(download_task)
+        for step_error in (delete_error, download_error):
+            if isinstance(step_error, Exception):
+                logger.error(
+                    "[{c.id}] Concurrent prefetch step failed".format(c=commit),
+                    exc_info=(type(step_error), step_error, step_error.__traceback__),
+                )
         logger.error(
-            "[{c.id}] Failed to fetch test cases".format(c=commit), exc_info=True
+            "[{c.id}] Failed to fetch test cases".format(c=commit),
+            exc_info=(type(test_cases), test_cases, test_cases.__traceback__),
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         if cfg.cleanup_on_error:
-            cleanup_tests(os.path.join(cfg.exec_dir, "commit_{}".format(commit.id)))
+            cleanup_tests(base_dir)
         return
 
-    # Delete results already produced by this commit, if any
-    await data_provider.delete_commit_test_results(commit)
+    if delete_error is not None:
+        # Wait for the in-flight download so a later retry's cleanup cannot
+        # race its worker thread, then propagate exactly like the sequential
+        # version (which had no try/except here: the commit stays in the
+        # queue and is retried).
+        await _await_task(download_task)
+        raise delete_error
+
     commit.reset()
     commit.status = Commit.STATUS_PROCESSING
     commit.compilation_started_time = datetime.datetime.now()
@@ -488,16 +685,18 @@ async def process_commit(data_provider, commit, cfg=None):
 
     logger.debug("[{c.id}] Preparing to run tests".format(c=commit))
     try:
-        base_dir = os.path.join(cfg.exec_dir, "commit_{}".format(commit.id))
-        remote_dir = os.path.join(cfg.exec_dir_remote, "commit_{}".format(commit.id))
-        cleanup_tests(base_dir)
-        os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
+        # The commit file was downloaded during the prefetch phase; surface a
+        # failure here so it goes through the original "prepare runs" error
+        # path (log + STATUS_INTERNAL_ERROR + cleanup).
+        commit_file_error = await _await_task(download_task)
+        if commit_file_error is not None:
+            raise commit_file_error
         create_container_cfg_file(commit, test_cases, base_dir)
-        await copy_source_files(data_provider, storage_provider, commit, base_dir)
-        # `copy_test_case_files` is synchronous and downloads from S3: run it
-        # in a worker thread so the event loop is not blocked.
-        await asyncio.to_thread(
-            copy_test_case_files, storage_provider, test_cases, base_dir
+        await copy_source_files(
+            data_provider, storage_provider, commit, base_dir, download_semaphore
+        )
+        await copy_test_case_files(
+            storage_provider, test_cases, base_dir, download_semaphore
         )
     except Exception:
         logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
@@ -557,6 +756,13 @@ async def process_commits(data_provider, commit_queue, cfg=None):
     of commits in flight inside this worker; the slot is acquired before the
     task is spawned and released in the task's ``finally`` block, so a failing
     commit can never leak a slot.
+
+    The poller may deliver the same commit more than once (it re-enqueues
+    every commit it still sees as STATUS_IN_QUEUE), so each pulled commit is
+    first claimed with an atomic conditional UPDATE in the provider: only the
+    worker whose claim wins actually processes it, duplicate copies are
+    skipped, and a claim is released back to IN_QUEUE after a retryable
+    failure.
 
     ``queue.get`` runs in a thread with a bounded wait so the loop can notice
     failures of in-flight tasks. When the ``None`` stop hint arrives the loop
@@ -625,12 +831,40 @@ async def process_commits(data_provider, commit_queue, cfg=None):
 
     async def run_commit(commit):
         try:
-            await process_commit(data_provider, commit, cfg)
-        except non_retryable_exceptions as e:
-            logger.warning(f"Caught non-retryable exception: {e}")
-            fatal.set()
-        except Exception as e:
-            logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+            # Claim the commit atomically before processing it. The poller
+            # can enqueue the same commit more than once (a commit stays
+            # STATUS_IN_QUEUE until a worker takes it, e.g. while it waits in
+            # the bounded task queue), so several workers may pull copies of
+            # it. The claim is a conditional UPDATE (IN_QUEUE -> PROCESSING)
+            # in the provider, which is the only state shared across worker
+            # processes: only the worker whose update wins processes the
+            # commit; the losers drop their copies.
+            try:
+                claimed = await data_provider.claim_commit(commit)
+            except Exception as e:
+                # Could not claim (e.g. a database hiccup): leave the commit
+                # in the queue to be pulled again later.
+                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+                return
+            if not claimed:
+                logger.debug(f"Commit {commit.id} already taken; skipping")
+                return
+            try:
+                await process_commit(data_provider, commit, cfg)
+            except non_retryable_exceptions as e:
+                logger.warning(f"Caught non-retryable exception: {e}")
+                fatal.set()
+            except Exception as e:
+                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+                # We still hold the claim: give the commit back to the queue
+                # so the poller can retry it.
+                try:
+                    await data_provider.release_commit(commit)
+                except Exception:
+                    logger.warning(
+                        f"Could not release commit {commit.id} back to the queue",
+                        exc_info=True,
+                    )
         finally:
             # Always give the slot back, even when the commit failed.
             semaphore.release()

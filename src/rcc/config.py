@@ -13,6 +13,14 @@ DEFAULT_LOGGER = "run.codes"
 # ``concurrency_per_worker``.
 DEFAULT_CONCURRENCY_PER_WORKER = 4
 
+# How long (seconds) the poller suppresses re-enqueueing a commit it already
+# put on the task queue. The poller re-fetches every commit that is still
+# ``STATUS_IN_QUEUE`` on each cycle; this window keeps a commit waiting for a
+# free worker from being put on the queue again and again (worker-side
+# claiming already makes such duplicates harmless, so this only saves queue
+# capacity and claim round trips).
+DEFAULT_COMMIT_ENQUEUE_SUPPRESSION = 60
+
 
 # Configs are registered here
 __config__ = dict()
@@ -105,6 +113,14 @@ class EnvConfig(Config):
                 os.environ.get(
                     "RUNCODES_COMPILER_CONCURRENCY",
                     str(DEFAULT_CONCURRENCY_PER_WORKER),
+                )
+            ),
+            # Seconds the poller waits before re-enqueueing a commit it
+            # already put on the task queue.
+            "commit_enqueue_suppression": float(
+                os.environ.get(
+                    "RUNCODES_COMPILER_ENQUEUE_SUPPRESSION",
+                    str(DEFAULT_COMMIT_ENQUEUE_SUPPRESSION),
                 )
             ),
             "min_sleep_time": 1,

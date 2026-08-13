@@ -135,6 +135,27 @@ class TrackingProvider(rcc.provider.data.DataProvider):
         return []
 
 
+class ClaimingProvider(TrackingProvider):
+    """Mimics the Postgres claim semantics: first claim per commit wins."""
+
+    def __init__(self):
+        super().__init__()
+        self._claimed = set()
+        self.claim_count = 0
+        self.release_count = 0
+
+    async def claim_commit(self, commit):
+        self.claim_count += 1
+        if commit.id in self._claimed:
+            return False
+        self._claimed.add(commit.id)
+        return True
+
+    async def release_commit(self, commit):
+        self.release_count += 1
+        self._claimed.discard(commit.id)
+
+
 def unfinished_tasks(q):
     """Number of items put on a JoinableQueue but not yet task_done()'d.
 
@@ -315,6 +336,49 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
 
+    async def test_duplicate_commits_are_processed_once(self):
+        """Copies of the same commit (the poller re-enqueues IN_QUEUE
+        commits) are claimed by exactly one worker."""
+        state = {"processed": []}
+
+        async def fake(data_provider, commit, cfg=None):
+            state["processed"].append(commit.id)
+
+        provider = ClaimingProvider()
+        cfg = make_cfg(2)
+        task_queue = mp.JoinableQueue()
+        for commit in (make_commit(1), make_commit(1), make_commit(2)):
+            task_queue.put(commit)
+        task_queue.put(None)
+        with mock.patch.object(rcc.engine, "process_commit", fake):
+            await rcc.engine.process_commits(provider, task_queue, cfg)
+
+        # The duplicate copy of commit 1 was claimed and skipped.
+        self.assertEqual(sorted(state["processed"]), [1, 2])
+        self.assertEqual(provider.claim_count, 3)
+        self.assertEqual(provider._claimed, {1, 2})
+        self.assertEqual(unfinished_tasks(task_queue), 0)
+
+    async def test_retryable_failure_releases_the_claim(self):
+        """A claimed commit that fails retryably goes back to IN_QUEUE."""
+
+        async def fake(data_provider, commit, cfg=None):
+            raise RuntimeError("retryable failure")
+
+        provider = ClaimingProvider()
+        cfg = make_cfg(2)
+        task_queue = mp.JoinableQueue()
+        task_queue.put(make_commit(1))
+        task_queue.put(None)
+        with mock.patch.object(rcc.engine, "process_commit", fake):
+            await rcc.engine.process_commits(provider, task_queue, cfg)
+
+        self.assertEqual(provider.claim_count, 1)
+        self.assertEqual(provider.release_count, 1)
+        # The claim was given back: a later pull may take the commit again.
+        self.assertEqual(provider._claimed, set())
+        self.assertEqual(unfinished_tasks(task_queue), 0)
+
 
 class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
     async def test_multiple_commits_processed_concurrently(self):
@@ -374,6 +438,22 @@ class RecordingJoinableQueue(mp_queues.JoinableQueue):
     def __init__(self, maxsize=0):
         super().__init__(maxsize, ctx=mp.get_context())
         RecordingJoinableQueue.instances.append(self)
+
+
+class RecordingPutQueue(mp_queues.JoinableQueue):
+    """JoinableQueue that records the ids of everything put into it."""
+
+    instances = []
+
+    def __init__(self, maxsize=0):
+        super().__init__(maxsize, ctx=mp.get_context())
+        self.put_ids = []
+        RecordingPutQueue.instances.append(self)
+
+    def put(self, item, *args, **kwargs):
+        if item is not None:
+            self.put_ids.append(item.id)
+        super().put(item, *args, **kwargs)
 
 
 class FakeProcess(object):
@@ -459,6 +539,24 @@ class PollingProvider(rcc.provider.data.DataProvider):
         return []
 
 
+class RepeatingProvider(rcc.provider.data.DataProvider):
+    """Returns the same commit on every poll cycle; counts the cycles."""
+
+    def __init__(self, commit):
+        self._commit = commit
+        self.fetch_count = 0
+
+    async def open(self):
+        pass
+
+    async def close(self):
+        pass
+
+    async def fetch_commits_in_queue(self):
+        self.fetch_count += 1
+        return [self._commit]
+
+
 class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
     def test_queue_maxsize_is_two_times_total_slots(self):
         cfg = rcc.config.Config({"num_workers": 3, "concurrency_per_worker": 4})
@@ -524,6 +622,118 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
         self.assertEqual(unfinished_tasks(task_queue), 0)
+
+    async def _run_main_with_repeating_commit(self, provider, cfg, runtime):
+        """Drive rcc.main() for ``runtime`` seconds, then cancel it."""
+        RecordingPutQueue.instances = []
+        patches = [
+            mock.patch.object(rcc.config, "from_env", return_value=cfg),
+            mock.patch.object(
+                rcc, "parse_args", return_value=argparse.Namespace(config="env")
+            ),
+            mock.patch.object(
+                rcc, "setup_logger", return_value=logging.getLogger("rcc.tests.main")
+            ),
+            mock.patch.object(rcc.util, "SingletonContext", _NullSingletonContext),
+            mock.patch.object(rcc.provider.data, "from_config", return_value=provider),
+            mock.patch.object(rcc.engine, "run_worker", fake_worker),
+            mock.patch.object(mp, "Process", FakeProcess),
+            mock.patch.object(mp, "JoinableQueue", RecordingPutQueue),
+        ]
+        for patch in patches:
+            patch.start()
+        try:
+            main_task = asyncio.create_task(rcc.main())
+            await asyncio.sleep(runtime)
+            main_task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await main_task
+        finally:
+            for patch in reversed(patches):
+                patch.stop()
+        (task_queue,) = RecordingPutQueue.instances
+        return task_queue
+
+    async def test_poller_suppresses_recent_commits(self):
+        """A commit that stays IN_QUEUE is put on the queue only once."""
+        provider = RepeatingProvider(make_commit(1))
+        cfg = rcc.config.Config(
+            {
+                "provider": {"data": "postgres", "storage": "s3"},
+                "num_workers": 1,
+                "concurrency_per_worker": 1,
+                "min_sleep_time": 0.02,
+                "max_sleep_time": 0.02,
+                "lock_file": "compiler.lock",
+                "log": None,
+            }
+        )
+
+        task_queue = await self._run_main_with_repeating_commit(
+            provider, cfg, runtime=0.6
+        )
+
+        # The poller fetched several times but only enqueued the commit once.
+        self.assertGreaterEqual(provider.fetch_count, 2)
+        self.assertEqual(task_queue.put_ids, [1])
+
+    async def test_poller_reenqueues_after_suppression_expires(self):
+        """A commit still IN_QUEUE after the window is enqueued again."""
+        provider = RepeatingProvider(make_commit(1))
+        cfg = rcc.config.Config(
+            {
+                "provider": {"data": "postgres", "storage": "s3"},
+                "num_workers": 1,
+                "concurrency_per_worker": 1,
+                "min_sleep_time": 0.03,
+                "max_sleep_time": 0.03,
+                "lock_file": "compiler.lock",
+                "log": None,
+                "commit_enqueue_suppression": 0.1,
+            }
+        )
+
+        task_queue = await self._run_main_with_repeating_commit(
+            provider, cfg, runtime=0.8
+        )
+
+        # After the 0.1 s window expired the poller re-enqueued the commit on
+        # the following cycles (a worker may have died before claiming it).
+        self.assertGreaterEqual(task_queue.put_ids.count(1), 3)
+
+
+class TestSelectNewCommits(unittest.TestCase):
+    """Unit tests for the poller's duplicate-enqueue suppression helper."""
+
+    def test_recent_commits_are_suppressed_and_tracking_is_pruned(self):
+        tracker = {}
+        c1, c2 = make_commit(1), make_commit(2)
+
+        # First appearance: both are new.
+        new = rcc._select_new_commits([c1, c2], tracker, 60)
+        self.assertEqual([c.id for c in new], [1, 2])
+        tracker[1] = time.monotonic()
+        tracker[2] = time.monotonic()
+
+        # Still IN_QUEUE within the window: suppressed.
+        self.assertEqual(rcc._select_new_commits([c1, c2], tracker, 60), [])
+
+        # A claimed commit leaves the fetch: its entry is pruned...
+        self.assertEqual(rcc._select_new_commits([c1], tracker, 60), [])
+        self.assertEqual(set(tracker), {1})
+
+        # ...so a commit released back to IN_QUEUE is re-enqueued at once.
+        new = rcc._select_new_commits([c2], tracker, 60)
+        self.assertEqual([c.id for c in new], [2])
+        tracker[2] = time.monotonic()
+
+        # A commit still IN_QUEUE past the window is re-enqueued (its worker
+        # may have died between pulling and claiming it).
+        tracker[1] = time.monotonic() - 61
+        new = rcc._select_new_commits([c1, c2], tracker, 60)
+        self.assertEqual([c.id for c in new], [1])
+        self.assertNotIn(1, tracker)
+        self.assertIn(2, tracker)
 
 
 if __name__ == "__main__":
