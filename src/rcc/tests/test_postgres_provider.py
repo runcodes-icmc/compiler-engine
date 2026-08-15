@@ -467,7 +467,7 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
             False,  # ghost
             5,  # real_id (real_exercise_id)
             3,  # course_id
-            "commits/1/main.c",  # real_offering_id (unused index filler)
+            "commits/1/main.c",  # real_offering_id
         ]
         cursor = FakeCursor(result_sets=[[row]])
         provider, _ = self._provider_with(FakeConnection(cursor))

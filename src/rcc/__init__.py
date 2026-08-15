@@ -27,11 +27,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def setup_logger(name: str, log_config: dict[str, object] | None) -> logging.Logger:
-    # NOTE: should we handle multiprocessing?
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
 
-    # Console Logger
     console_handler = logging.StreamHandler(sys.stderr)
     console_fmt = logging.Formatter(
         "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
@@ -39,7 +37,6 @@ def setup_logger(name: str, log_config: dict[str, object] | None) -> logging.Log
     console_handler.setFormatter(console_fmt)
     logger.addHandler(console_handler)
 
-    # File Logger
     if log_config is not None:
         fmt = "%(asctime)s [%(levelname)s] <%(process)d> %(message)s"
         formatter = logging.Formatter(fmt)
@@ -144,15 +141,11 @@ async def main() -> None:
         logger.info("Started")
         logger.debug("Configuration: {}".format(cfg))
 
-        # Provides acccess to metadata on things such as commits, exercises,
-        # test cases, etc.
         data_provider = data.from_config(cfg)
 
-        # Queue and workers used to distribute the workload of commit processing.
-        # The queue is bounded (2x the commit slots across all workers): a
-        # blocking put() is the backpressure mechanism that replaces the old
-        # per-batch join() barrier. Putting is offloaded to a thread so that a
-        # full queue never blocks the event loop.
+        # Bounded task queue (2x the commit slots across all workers): a
+        # blocking put() is the backpressure mechanism. Putting is offloaded
+        # to a thread so a full queue never blocks the event loop.
         task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue(
             maxsize=task_queue_maxsize(cfg)
         )
@@ -208,7 +201,7 @@ async def main() -> None:
                     for commit in commits:
                         # Blocking put on a bounded queue = backpressure:
                         # the loop stalls here while the workers drain, so
-                        # there is no need for a join() barrier anymore.
+                        # no join() barrier is needed.
                         await asyncio.to_thread(task_queue.put, commit)
                         recently_enqueued[commit.id] = time.monotonic()
                     sleeper.reset()

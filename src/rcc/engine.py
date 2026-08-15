@@ -106,9 +106,6 @@ async def download_commit_file(
 
     Split out of :func:`copy_source_files` so the download can start
     concurrently with the prefetch database queries in :func:`process_commit`.
-    The directory is created here (same path and permissions as before, just
-    earlier, because the download needs it); the zip extraction in
-    :func:`copy_source_files` still runs only after this completes.
     """
     if commit.fname is None:
         raise ValueError("Commit has no filename; cannot download its source file")
@@ -130,9 +127,9 @@ async def copy_source_files(
     """Copy the exercise's extra source files into ``<base_dir>/<cfg.src_dir>``.
 
     The commit file itself was already downloaded concurrently with the
-    prefetch queries (see :func:`download_commit_file`), so the zip handling
-    below is unchanged. Exercise-file downloads are independent of each other
-    and run concurrently, bounded by ``semaphore``.
+    prefetch queries (see :func:`download_commit_file`); zip handling happens
+    here. Exercise-file downloads are independent of each other and run
+    concurrently, bounded by ``semaphore``.
     """
     fname = commit.fname
     if fname is None:
@@ -141,11 +138,9 @@ async def copy_source_files(
     src_dir = os.path.join(base_dir, str(cfg.src_dir))
     destination = os.path.join(src_dir, os.path.basename(fname))
 
-    # Add info about file extension and whether the submission is compilable
     set_extension(commit)
     extension = commit.extension
     if extension == "zip":
-        # Extra tasks if we have a zip (extract, deduce language of files)
         with zipfile.ZipFile(destination) as zip_file:
             extension = util.deduce_language(zip_file)
             commit.extension = extension
@@ -183,7 +178,7 @@ async def copy_test_case_files(
     Each test case's downloads are independent of the others', so one task per
     test case runs in parallel, bounded by ``semaphore``. Directory creation
     stays per test case, right before that case's additional files are
-    downloaded, exactly where it was in the sequential version.
+    downloaded.
     """
 
     async def copy_one(test_case: TestCase) -> None:
@@ -223,7 +218,7 @@ def create_container_cfg_file(
     )
     with open(os.path.join(base_dir, str(cfg.container_cfg_file)), "w") as cfg_file:
         for cfg_item in container_cfg:
-            if cfg_item[2]:  # should quote?
+            if cfg_item[2]:  # value needs shell quoting
                 print("{c[0]}='{c[1]}'".format(c=cfg_item), file=cfg_file)
             else:
                 print("{c[0]}={c[1]}".format(c=cfg_item), file=cfg_file)
@@ -525,9 +520,8 @@ async def run_tests(
 ) -> list[TestCaseResult]:
     """Run the submitted code in a container and collect the test results.
 
-    Runs on the caller's event loop (previously a fresh event loop was created
-    per commit): the container is executed while commit status updates are
-    pushed to the (async) data provider.
+    Runs on the caller's event loop so commit status updates can be pushed to
+    the (async) data provider.
     """
     await run(data_provider, commit, test_cases, base_dir, remote_dir)
 
@@ -634,7 +628,6 @@ async def process_commit(
     if cfg is None:
         cfg = config.get_config(config.DEFAULT_CONFIG)
     if cfg is None:
-        # No configuration was passed and none is registered.
         raise RuntimeError("No default configuration registered")
     logger = logging.getLogger(config.DEFAULT_LOGGER)
     logger.debug(
@@ -669,9 +662,8 @@ async def process_commit(
 
     # Remove leftovers from a previous attempt and create the work directory
     # BEFORE any prefetch download starts, so this cleanup can never delete a
-    # file the prefetch just wrote. This used to run inside the "prepare
-    # runs" block below; it keeps that block's error handling (the same log
-    # line, STATUS_INTERNAL_ERROR transition and cleanup behaviour).
+    # file the prefetch just wrote. The error handling mirrors the "prepare
+    # runs" block below (same log line and STATUS_INTERNAL_ERROR transition).
     try:
         cleanup_tests(base_dir)
         os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
@@ -686,28 +678,22 @@ async def process_commit(
 
     # ---- Prefetch phase: overlap the independent IO ------------------------
     #
-    # Three operations do not depend on each other and start together:
-    #   * fetch_test_cases(commit)            - DB read; own pool connection
-    #   * delete_commit_test_results(commit)  - DB write; own pool connection
-    #                                           (each provider call keeps its
-    #                                           own transaction)
+    # Three independent operations start together:
+    #   * fetch_test_cases(commit)            - DB read
+    #   * delete_commit_test_results(commit)  - DB write
     #   * the commit source file download     - S3, in a worker thread
     #
-    # Ordering guarantees kept from the sequential version:
-    #   * the DB pair is awaited FIRST and commit.reset()/STATUS_PROCESSING
-    #     is written as soon as it completes. The S3 download must never
-    #     delay that write: the poller re-enqueues every commit it still
-    #     sees as STATUS_IN_QUEUE, so a slow download would otherwise leave
-    #     the commit in the queue for the whole download time and several
-    #     workers would process copies of it concurrently (colliding on the
-    #     same base_dir);
+    # Ordering guarantees:
+    #   * the DB pair is awaited first and commit.reset()/STATUS_PROCESSING is
+    #     written as soon as it completes: the poller re-enqueues every commit
+    #     it still sees as STATUS_IN_QUEUE, so a slow download would otherwise
+    #     leave the commit queued for the whole download time and several
+    #     workers would process copies of it (colliding on the same base_dir);
     #   * delete_commit_test_results still finishes before the
-    #     STATUS_PROCESSING update (they touch different tables, but a
-    #     crash between the two must not leave a commit marked PROCESSING
-    #     with stale results);
-    #   * the download's failure surfaces later through the original
-    #     "prepare runs" error path, exactly where the sequential version
-    #     raised it.
+    #     STATUS_PROCESSING update: a crash between the two must not leave a
+    #     commit marked PROCESSING with stale results;
+    #   * the download's failure surfaces through the "prepare runs" error
+    #     path below.
     async def fetch_commit_file() -> None:
         await download_commit_file(storage_provider, commit, base_dir)
 
@@ -853,11 +839,11 @@ async def process_commits(
 
     ``queue.get`` runs in a thread with a bounded wait so the loop can notice
     failures of in-flight tasks. When the ``None`` stop hint arrives the loop
-    stops pulling and drains every in-flight commit before exiting. Exceptions
-    raised by a commit are classified as before: non-retryable ones stop the
-    worker (after the in-flight commits finish), retryable ones are logged and
-    skipped. The process database connection pool is opened here (one pool per
-    process) and closed when the worker stops.
+    stops pulling and drains every in-flight commit before exiting.
+    Non-retryable exceptions stop the worker (after the in-flight commits
+    finish); retryable ones are logged and skipped. The process database
+    connection pool is opened here (one pool per process) and closed when the
+    worker stops.
     """
     # Set up logging for worker process
     logger = logging.getLogger(config.DEFAULT_LOGGER)
@@ -876,7 +862,6 @@ async def process_commits(
 
     # Register configuration if provided
     if cfg is not None:
-        # Access the underlying configuration dictionary
         _ = config.from_dict(config.DEFAULT_CONFIG, cfg.get_dict())
     else:
         cfg = config.get_config(config.DEFAULT_CONFIG)
@@ -998,7 +983,6 @@ async def process_commits(
                 except Exception as e:
                     logger.warning(f"Caught retryable exception: {e}", exc_info=True)
                 finally:
-                    # Marks task as done
                     commit_queue.task_done()
 
             # Drain: wait for every in-flight commit before exiting.

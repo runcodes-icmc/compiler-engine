@@ -249,27 +249,3 @@ class TestEngineZip(unittest.TestCase):
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
         self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_m(self):
-    #    commit = build_commit(6, 'm', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_pas(self):
-    #    commit = build_commit(7, 'pas', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_por(self):
-    #    commit = build_commit(8, 'por', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_py2(self):
-    #    commit = build_commit(9, 'py2', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_py3(self):
-    #    commit = build_commit(10, 'py3', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)
-
-    # def test_process_commit_zip_r(self):
-    #    commit = build_commit(11, 'r', 'hello.zip', 'Zip/Makefile')
-    #    self.run_test_process_commit(commit)

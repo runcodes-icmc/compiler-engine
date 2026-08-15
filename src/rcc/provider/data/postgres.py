@@ -17,8 +17,7 @@ from .data_provider import DataProvider
 class Postgres(DataProvider):
     """PostgreSQL data provider backed by a shared async connection pool.
 
-    Instead of opening a fresh connection per call (the old psycopg2
-    pattern), every method now draws a connection from a single
+    Every method draws a connection from a single
     `psycopg_pool.AsyncConnectionPool`, created lazily by :meth:`open` and
     released by :meth:`close`.
 
@@ -383,12 +382,9 @@ class Postgres(DataProvider):
             " ORDER BY id"
         )
         # One batched query for every test case's files instead of one query
-        # per test case (the old N+1 pattern). psycopg3 adapts the list of
-        # ids to a Postgres array for ``= ANY(%s)``. Rows are attributed to
-        # their case by ``exercise_case_id``, preserving per-case file order:
-        # the single scan returns rows in the same (per-case) order the old
-        # per-case queries observed. File order is not semantically
-        # significant anyway (files are addressed by name).
+        # per test case. psycopg3 adapts the list of ids to a Postgres array
+        # for ``= ANY(%s)``. Rows are attributed to their case by
+        # ``exercise_case_id``.
         files_query = (
             "SELECT exercise_case_id, path"
             " FROM exercise_case_files"

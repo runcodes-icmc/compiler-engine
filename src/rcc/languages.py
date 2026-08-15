@@ -81,7 +81,6 @@ KNOWN_LANGUAGES: list[Language] = [
     Language("Zig", ["zig"]),
 ]
 
-# Build lookup table for language extensions
 _LANGUAGE_EXTENSIONS_MAPPING: dict[str, Language | None] = {}
 for lang in KNOWN_LANGUAGES:
     for ext in lang.extensions:

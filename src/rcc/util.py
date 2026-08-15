@@ -85,7 +85,7 @@ class UninterruptibleContext:
 class Sleeper:
     """
     Used for variable sleep times. Successive calls to sleep() increase sleep
-    time towards the max sleep time. A call to reset() goes back to mininum
+    time towards the max sleep time. A call to reset() goes back to minimum
     sleep time.
     """
 

@@ -25,7 +25,6 @@ DEFAULT_CONCURRENCY_PER_WORKER = 4
 DEFAULT_COMMIT_ENQUEUE_SUPPRESSION = 60
 
 
-# Configs are registered here
 __config__: dict[str, Config] = dict()
 
 
@@ -61,9 +60,9 @@ class Config:
     def get(self, key: str, default: object | None = None) -> object:
         """Return ``config[key]``, or ``default`` when the key is missing.
 
-        Mirrors ``dict.get``. Used for optional keys (such as
+        Mirrors ``dict.get``; used for optional keys (such as
         ``concurrency_per_worker``) that JSON configuration files may not
-        define; attribute access would raise ``KeyError`` for those.
+        define. Attribute access raises ``KeyError`` for those.
         """
         return self.__config__.get(key, default)
 
@@ -164,18 +163,12 @@ class EnvConfig(Config):
 
 
 def get_config(name: str) -> Config | None:
-    """
-    Returns the `Config` object registered to the given name or `None` if the
-    name is not registered.
-    """
+    """Return the `Config` registered under the given name, or `None`."""
     return __config__.get(name)
 
 
 def from_json(name: str, fname: str) -> Config:
-    """
-    Registers a new `Config` object with the given name, read from a JSON file. Returns
-    the created `Config` object.
-    """
+    """Register a new `Config` with the given name, read from a JSON file."""
     with open(fname, "r") as config_file:
         config_dict = cast(dict[str, object], json.load(config_file))
         c = Config(config_dict)
@@ -184,19 +177,14 @@ def from_json(name: str, fname: str) -> Config:
 
 
 def from_dict(name: str, d: dict[str, object]) -> Config:
-    """
-    Registers a new config with the given name, built from a regular `dict`.
-    Returns the created `Config` object.
-    """
+    """Register a new `Config` with the given name, built from a regular `dict`."""
     c = Config(d)
     __config__[name] = c
     return c
 
 
 def from_env(name: str) -> Config:
-    """
-    Registers a new config with the given name, building it from environment variables.
-    """
+    """Register a new `Config` with the given name, built from environment variables."""
     c = EnvConfig()
     __config__[name] = c
     return c

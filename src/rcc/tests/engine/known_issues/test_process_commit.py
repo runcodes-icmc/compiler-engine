@@ -16,26 +16,6 @@ import rcc.provider.storage
 from rcc.languages import Language
 from rcc.model import Commit, TestCase, TestCaseResult
 
-# Metadata sample
-# {
-#    'id': 0,
-#    'user_email': '',
-#    'fname': '',
-#    'language_name': '',
-#    'expected_status': Commit.STATUS_,
-#    'exercise': {
-#        'id': 0,
-#        'test_cases': [
-#            {
-#                'id': 0,
-#                'out_type': TestCase.IO_TYPE_,
-#                'files': ['fname', ...],
-#            },
-#            ...
-#        ],
-#    },
-# }
-
 
 class TestCaseMetadata(TypedDict):
     id: int
