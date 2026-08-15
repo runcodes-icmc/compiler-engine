@@ -1,6 +1,6 @@
 # run.codes - Compiler Engine
 
-This project contains the compiler engine written in Python. The compiler engine is responsible for compiling 
+This project contains the compiler engine written in Python. The compiler engine is responsible for compiling
 and processing submissions by pooling over the database and updating the results directly on the database.
 
 ## Build & Run
@@ -13,9 +13,9 @@ The project's configuration is done through environment variables, which can be 
 
 ## Additional Details
 
-The Compiler-Engine does not provide an API for external access. The entry point of the application is the 
+The Compiler-Engine does not provide an API for external access. The entry point of the application is the
 rcc package (on the `__init__.py`). The recommended execution method is through Docker Compose, even though
-pipenv is used to manage dependencies.
+uv is used to manage dependencies.
 
 ## License
 
