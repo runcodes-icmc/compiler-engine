@@ -11,9 +11,20 @@ from typing import cast, override
 DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
 
+# Default number of worker processes spawned to process commits. The
+# workload is IO-bound (containers, S3, database), so sizing is deliberately
+# *not* tied to the CPU count: the real ceiling for in-flight work is how
+# many compilation containers the Docker host can run at once, not the
+# number of cores. Worker processes are also the expensive part of the
+# pipeline (each owns an event loop and a database connection pool), so
+# prefer raising the per-worker concurrency over spawning more processes.
+DEFAULT_NUM_WORKERS = 2
+
 # Default number of commits a single worker process may process concurrently.
 # Used as the fallback for JSON configuration files that do not define
-# ``concurrency_per_worker``.
+# ``concurrency_per_worker``. Together with `DEFAULT_NUM_WORKERS` this bounds
+# the total number of in-flight commits (workers x concurrency); the
+# practical ceiling is the Docker host capacity, not the CPU count.
 DEFAULT_CONCURRENCY_PER_WORKER = 4
 
 # How long (seconds) the poller suppresses re-enqueueing a commit it already
@@ -23,6 +34,21 @@ DEFAULT_CONCURRENCY_PER_WORKER = 4
 # claiming already makes such duplicates harmless, so this only saves queue
 # capacity and claim round trips).
 DEFAULT_COMMIT_ENQUEUE_SUPPRESSION = 60
+
+
+class ConfigError(ValueError):
+    """Raised when a configuration value is missing, unparseable or invalid."""
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an integer env var, raising `ConfigError` with a clear message."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError("{} must be an integer, got {!r}".format(name, raw)) from None
 
 
 __config__: dict[str, Config] = dict()
@@ -83,23 +109,109 @@ class Config:
         return repr(self.__config__)
 
 
+def parallelism_values(cfg: Config) -> tuple[int, int]:
+    """Return ``(num_workers, concurrency_per_worker)`` from ``cfg``.
+
+    Missing keys fall back to `DEFAULT_NUM_WORKERS` and
+    `DEFAULT_CONCURRENCY_PER_WORKER`, so both env- and JSON-built configs
+    behave identically. Raises `ConfigError` when a value cannot be parsed
+    as an integer.
+    """
+
+    def _parse_int(value: object, key: str, env_var: str) -> int:
+        try:
+            return int(str(value))
+        except (TypeError, ValueError):
+            raise ConfigError(
+                "{} ({}) must be an integer, got {!r}".format(key, env_var, value)
+            ) from None
+
+    return (
+        _parse_int(
+            cfg.get("num_workers", DEFAULT_NUM_WORKERS),
+            "num_workers",
+            "RUNCODES_COMPILER_NUM_WORKERS",
+        ),
+        _parse_int(
+            cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER),
+            "concurrency_per_worker",
+            "RUNCODES_COMPILER_CONCURRENCY",
+        ),
+    )
+
+
+def total_slots(cfg: Config) -> int:
+    """Total number of commits that may be in flight across all workers."""
+    num_workers, concurrency = parallelism_values(cfg)
+    return num_workers * concurrency
+
+
+def queue_maxsize(cfg: Config) -> int:
+    """Capacity of the bounded task queue: 2x the total commit slots.
+
+    The factor of two gives the pipeline some headroom while still letting a
+    blocking ``put`` act as the backpressure mechanism that keeps the parent
+    from overproducing work.
+    """
+    return 2 * total_slots(cfg)
+
+
+def validate(cfg: Config) -> None:
+    """Validate the parallelism-related values of ``cfg``.
+
+    Raises `ConfigError` with a human-readable message when a value is
+    missing, unparseable, or nonsensical: ``num_workers >= 1``,
+    ``concurrency >= 1``, and a bounded task queue at least as large as the
+    total number of in-flight commit slots.
+    """
+    num_workers, concurrency = parallelism_values(cfg)
+    if num_workers < 1:
+        raise ConfigError(
+            "num_workers (RUNCODES_COMPILER_NUM_WORKERS) must be >= 1, got {}".format(
+                num_workers
+            )
+        )
+    if concurrency < 1:
+        raise ConfigError(
+            "concurrency_per_worker (RUNCODES_COMPILER_CONCURRENCY) must be >= 1, got {}".format(
+                concurrency
+            )
+        )
+    total = total_slots(cfg)
+    qsize = queue_maxsize(cfg)
+    if qsize < total:
+        raise ConfigError(
+            "task queue size ({}) must be >= total in-flight slots ({})".format(
+                qsize, total
+            )
+        )
+
+
 class EnvConfig(Config):
     def __init__(self) -> None:
+        db_config: dict[str, object] = {
+            "name": os.environ.get("RUNCODES_DB_DATABASE", "runcodes"),
+            "host": os.environ.get("RUNCODES_DB_HOST", "database"),
+            "port": int(os.environ.get("RUNCODES_DB_PORT", "5432")),
+            "username": os.environ.get("RUNCODES_DB_USERNAME", "runcodes"),
+            "password": os.environ.get("RUNCODES_DB_PASSWORD", "asdasd33"),
+            "pool_min_size": int(os.environ.get("RUNCODES_DB_POOL_MIN_SIZE", "1")),
+            "pool_timeout": float(os.environ.get("RUNCODES_DB_POOL_TIMEOUT", "30")),
+        }
+        # ``pool_max_size`` is deliberately *omitted* when the env var is
+        # unset: the Postgres provider derives the maximum from the
+        # per-process concurrency (concurrency + 2, clamped to at least
+        # ``pool_min_size``). An explicitly configured
+        # ``RUNCODES_DB_POOL_MAX_SIZE`` always wins.
+        pool_max_env = os.environ.get("RUNCODES_DB_POOL_MAX_SIZE")
+        if pool_max_env is not None:
+            db_config["pool_max_size"] = int(pool_max_env)
         env_configs: dict[str, object] = {
             "provider": {
                 "data": "postgres",
                 "storage": "s3",
             },
-            "db": {
-                "name": os.environ.get("RUNCODES_DB_DATABASE", "runcodes"),
-                "host": os.environ.get("RUNCODES_DB_HOST", "database"),
-                "port": int(os.environ.get("RUNCODES_DB_PORT", "5432")),
-                "username": os.environ.get("RUNCODES_DB_USERNAME", "runcodes"),
-                "password": os.environ.get("RUNCODES_DB_PASSWORD", "asdasd33"),
-                "pool_min_size": int(os.environ.get("RUNCODES_DB_POOL_MIN_SIZE", "1")),
-                "pool_max_size": int(os.environ.get("RUNCODES_DB_POOL_MAX_SIZE", "10")),
-                "pool_timeout": float(os.environ.get("RUNCODES_DB_POOL_TIMEOUT", "30")),
-            },
+            "db": db_config,
             "s3": {
                 "region": os.environ.get("RUNCODES_S3_REGION", "sa-east-1"),
                 "endpoint": os.environ.get(
@@ -116,15 +228,12 @@ class EnvConfig(Config):
                 "compilation_files_dir": "compilationfiles",
             },
             "lock_file": "compiler.lock",
-            "num_workers": int(
-                os.environ.get("RUNCODES_COMPILER_NUM_WORKERS", f"{os.cpu_count()}")
+            "num_workers": _env_int(
+                "RUNCODES_COMPILER_NUM_WORKERS", DEFAULT_NUM_WORKERS
             ),
             # Number of commits each worker process handles concurrently.
-            "concurrency_per_worker": int(
-                os.environ.get(
-                    "RUNCODES_COMPILER_CONCURRENCY",
-                    str(DEFAULT_CONCURRENCY_PER_WORKER),
-                )
+            "concurrency_per_worker": _env_int(
+                "RUNCODES_COMPILER_CONCURRENCY", DEFAULT_CONCURRENCY_PER_WORKER
             ),
             # Seconds the poller waits before re-enqueueing a commit it
             # already put on the task queue.

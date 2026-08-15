@@ -189,7 +189,9 @@ class RecordingPool:
         self.closed = True
 
 
-def make_cfg(**db_overrides: object) -> rcc.config.Config:
+def make_cfg(
+    concurrency: int | None = None, **db_overrides: object
+) -> rcc.config.Config:
     db: dict[str, object] = {
         "host": "dbhost",
         "port": 5433,
@@ -198,7 +200,10 @@ def make_cfg(**db_overrides: object) -> rcc.config.Config:
         "password": "pass",
     }
     db.update(db_overrides)
-    return rcc.config.Config({"db": db})
+    cfg: dict[str, object] = {"db": db}
+    if concurrency is not None:
+        cfg["concurrency_per_worker"] = concurrency
+    return rcc.config.Config(cfg)
 
 
 def make_commit(**overrides: object) -> Commit:
@@ -287,6 +292,34 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("port=5433", conninfo)
         self.assertIn("dbname=runcodes", conninfo)
         self.assertIn("user=user", conninfo)
+
+    def test_pool_max_size_derived_from_concurrency(self) -> None:
+        provider = Postgres(make_cfg(concurrency=4))
+        self.assertEqual(cast(object, getattr(provider, "_pool_max_size")), 6)
+
+    def test_pool_max_size_derived_value_clamped_to_min_size(self) -> None:
+        provider = Postgres(make_cfg(concurrency=1, pool_min_size=5))
+        self.assertEqual(cast(object, getattr(provider, "_pool_max_size")), 5)
+
+    def test_pool_max_size_explicit_value_wins(self) -> None:
+        provider = Postgres(make_cfg(concurrency=4, pool_max_size=100))
+        self.assertEqual(cast(object, getattr(provider, "_pool_max_size")), 100)
+
+    def test_pool_max_size_derivation_uses_default_concurrency(self) -> None:
+        provider = Postgres(make_cfg())
+        self.assertEqual(
+            cast(object, getattr(provider, "_pool_max_size")),
+            rcc.config.DEFAULT_CONCURRENCY_PER_WORKER + 2,
+        )
+
+    async def test_open_uses_derived_max_size_when_not_configured(self) -> None:
+        with mock.patch(
+            "rcc.provider.data.postgres.AsyncConnectionPool", RecordingPool
+        ):
+            provider = Postgres(make_cfg(concurrency=3))
+            await provider.open()
+        (pool,) = RecordingPool.instances
+        self.assertEqual(pool.kwargs["max_size"], 5)
 
     async def test_open_is_idempotent(self) -> None:
         with mock.patch(

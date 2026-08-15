@@ -8,7 +8,7 @@ import psycopg
 import psycopg.conninfo
 from psycopg_pool import AsyncConnectionPool
 
-from ...config import Config
+from ...config import DEFAULT_CONCURRENCY_PER_WORKER, Config
 from ...languages import language_from_extension
 from ...model import Commit, TestCase, TestCaseResult
 from .data_provider import DataProvider
@@ -43,13 +43,23 @@ class Postgres(DataProvider):
             user=cast(str, db["username"]),
             password=cast(str, db["password"]),
         )
-        # Pool sizing: every process performs its DB work sequentially (the
-        # main poller runs one query per poll cycle, each worker one commit
-        # at a time), so one connection is enough for the steady state. The
-        # maximum is a safety margin for transient overlap and is tunable
-        # through configuration/environment variables.
+        # Pool sizing: a commit holds a pooled connection only for short DB
+        # bursts (one transaction per provider call), so one connection per
+        # in-flight commit is enough for the steady state. When
+        # ``pool_max_size`` is not configured explicitly it is derived from
+        # the per-process concurrency as ``concurrency + 2`` (clamped to at
+        # least ``pool_min_size``); the +2 margin covers transient overlap
+        # between a finishing commit and the next one starting. An explicit
+        # ``pool_max_size`` always wins.
         self._pool_min_size = int(str(db.get("pool_min_size", 1)))
-        self._pool_max_size = int(str(db.get("pool_max_size", 10)))
+        explicit_max_size = db.get("pool_max_size")
+        if explicit_max_size is None:
+            concurrency = int(
+                str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
+            )
+            self._pool_max_size = max(concurrency + 2, self._pool_min_size)
+        else:
+            self._pool_max_size = int(str(explicit_max_size))
         self._pool_timeout = float(str(db.get("pool_timeout", 30.0)))
         self._pool = None
 

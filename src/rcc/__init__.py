@@ -104,14 +104,6 @@ async def _stop_workers(
             worker.terminate()
 
 
-def _total_slots(cfg: config.Config) -> int:
-    """Total number of commits that may be in flight across all workers."""
-    concurrency = int(
-        str(cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER))
-    )
-    return int(str(cfg.num_workers)) * concurrency
-
-
 def task_queue_maxsize(cfg: config.Config) -> int:
     """Capacity of the bounded task queue: 2x the total commit slots.
 
@@ -119,7 +111,7 @@ def task_queue_maxsize(cfg: config.Config) -> int:
     blocking ``put`` act as the backpressure mechanism that keeps the parent
     from overproducing work.
     """
-    return 2 * _total_slots(cfg)
+    return config.queue_maxsize(cfg)
 
 
 async def main() -> None:
@@ -129,13 +121,35 @@ async def main() -> None:
 
     args = vars(parse_args())
     config_arg = str(args.get("config"))
-    if config_arg == "env":
-        cfg = config.from_env(config.DEFAULT_CONFIG)
-    else:
-        cfg = config.from_json(config.DEFAULT_CONFIG, config_arg)
+    try:
+        if config_arg == "env":
+            cfg = config.from_env(config.DEFAULT_CONFIG)
+        else:
+            cfg = config.from_json(config.DEFAULT_CONFIG, config_arg)
+    except config.ConfigError as e:
+        # The configuration could not even be built (e.g. an unparseable
+        # parallelism env var). The configured logger is not available yet,
+        # so report on stderr and refuse to start.
+        print("Invalid configuration: {}".format(e), file=sys.stderr)
+        sys.exit(1)
 
     log_config = cast(dict[str, object], cfg.log) if isinstance(cfg.log, dict) else None
     logger = setup_logger(config.DEFAULT_LOGGER, log_config)
+
+    # Refuse to start on nonsensical parallelism values instead of crashing
+    # obscurely later (e.g. a semaphore of size 0 deadlocking every worker).
+    try:
+        config.validate(cfg)
+    except config.ConfigError as e:
+        logger.error("Invalid configuration: {}".format(e))
+        sys.exit(1)
+
+    num_workers, concurrency = config.parallelism_values(cfg)
+    logger.info(
+        "Parallelism: workers={}, concurrency={}, max_in_flight={}".format(
+            num_workers, concurrency, config.total_slots(cfg)
+        )
+    )
 
     with util.SingletonContext(cast(str, cfg.lock_file)):
         logger.info("Started")

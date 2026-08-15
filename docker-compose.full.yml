@@ -24,6 +24,20 @@ services:
     environment:
       RUNCODES_COMPILER_EXEC_DIR: /exec
       RUNCODES_COMPILER_EXEC_DIR_REMOTE: ${PWD}/exec
+      # Parallelism tuning: total in-flight commits = workers x concurrency
+      # (default 2 x 4 = 8). The real ceiling is how many compilation
+      # containers the Docker host can run at once, not the CPU count.
+      # Worker processes are the expensive part (each owns its own event
+      # loop and DB connection pool), so prefer raising concurrency over
+      # adding processes.
+      RUNCODES_COMPILER_NUM_WORKERS: 2
+      RUNCODES_COMPILER_CONCURRENCY: 4
+      # DB pool sizing (defaults shown): one pooled connection per
+      # in-flight commit is enough. When RUNCODES_DB_POOL_MAX_SIZE is
+      # unset it is derived as concurrency + 2; set it explicitly to win.
+      # RUNCODES_DB_POOL_MIN_SIZE: 1
+      # RUNCODES_DB_POOL_MAX_SIZE: 6
+      # RUNCODES_DB_POOL_TIMEOUT: 30
 
   # PostgreSQL Database
   database:
