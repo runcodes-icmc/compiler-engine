@@ -3,10 +3,11 @@ A collection of file comparison functions for text-only or text and numeric
 files, with varying strictness.
 """
 
-from six.moves import zip, zip_longest
+from itertools import zip_longest
+from typing import TextIO
 
 
-def text_cmp(file1, file2):
+def text_cmp(file1: str | TextIO, file2: str | TextIO) -> bool:
     if isinstance(file1, str):
         with open(file1, "r") as f1:
             return text_cmp(f1, file2)
@@ -24,7 +25,7 @@ def text_cmp(file1, file2):
         return False
 
 
-def text_cmp2(file1, file2):
+def text_cmp2(file1: str | TextIO, file2: str | TextIO) -> bool:
     if isinstance(file1, str):
         with open(file1, "r") as f1:
             return text_cmp2(f1, file2)
@@ -33,8 +34,8 @@ def text_cmp2(file1, file2):
             return text_cmp2(file1, f2)
     try:
         while True:
-            line1 = next(file1, None)
-            line2 = next(file2, None)
+            line1: str | None = next(file1, None)
+            line2: str | None = next(file2, None)
             if line1 is None or line2 is None:
                 break
             while line1.strip() == "":
@@ -56,7 +57,7 @@ def text_cmp2(file1, file2):
         return False
 
 
-def number_cmp(file1, file2, abs_error):
+def number_cmp(file1: str | TextIO, file2: str | TextIO, abs_error: float) -> bool:
     if isinstance(file1, str):
         with open(file1, "r") as f1:
             return number_cmp(f1, file2, abs_error)
@@ -64,9 +65,9 @@ def number_cmp(file1, file2, abs_error):
         with open(file2, "r") as f2:
             return number_cmp(file1, f2, abs_error)
 
-    def is_float(s):
+    def is_float(s: str) -> bool:
         try:
-            float(s)
+            _ = float(s)
             return True
         except ValueError:
             return False

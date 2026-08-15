@@ -2,8 +2,11 @@
 Module for handling configuration.
 """
 
+from __future__ import annotations
+
 import json
 import os
+from typing import cast, override
 
 DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
@@ -23,32 +26,39 @@ DEFAULT_COMMIT_ENQUEUE_SUPPRESSION = 60
 
 
 # Configs are registered here
-__config__ = dict()
+__config__: dict[str, Config] = dict()
 
 
 class Config:
     """
     Acts as a view for `dict` objects. All keys must be of type `str`. Useful
     for accessing config params in a more readable way.
+
+    Values are deliberately typed as `object`: configuration dictionaries mix
+    strings, numbers, booleans and nested dictionaries, and the type of each
+    key is only known at its point of use (callers convert with `str()`,
+    `int()`, `float()` or `bool()` as appropriate).
     """
 
-    def __init__(self, config_dict):
+    __config__: dict[str, object]
+
+    def __init__(self, config_dict: dict[str, object]) -> None:
         _check_dict(config_dict)
         self.__config__ = config_dict
 
-    def update(self, other):
+    def update(self, other: Config | dict[str, object]) -> None:
         """Update stored configuration using another `Config` or `dict`."""
         if isinstance(other, Config):
             self.__config__.update(other.get_dict())
-        elif isinstance(other, dict):
+        else:
             _check_dict(other)
             self.__config__.update(other)
 
-    def get_dict(self):
+    def get_dict(self) -> dict[str, object]:
         """Return the underlying configuration dictionary."""
         return self.__config__
 
-    def get(self, key, default=None):
+    def get(self, key: str, default: object | None = None) -> object:
         """Return ``config[key]``, or ``default`` when the key is missing.
 
         Mirrors ``dict.get``. Used for optional keys (such as
@@ -57,24 +67,26 @@ class Config:
         """
         return self.__config__.get(key, default)
 
-    def __getattr__(self, name):
+    def __getattr__(self, name: str) -> object:
         return self.__config__[name]
 
-    def __getstate__(self):
+    @override
+    def __getstate__(self) -> dict[str, dict[str, object]]:
         """Return state for pickling."""
         return {"__config__": self.__config__}
 
-    def __setstate__(self, state):
+    def __setstate__(self, state: dict[str, dict[str, object]]) -> None:
         """Restore state from pickling."""
         self.__config__ = state["__config__"]
 
-    def __repr__(self):
-        return self.__config__.__repr__()
+    @override
+    def __repr__(self) -> str:
+        return repr(self.__config__)
 
 
 class EnvConfig(Config):
-    def __init__(self):
-        env_configs = {
+    def __init__(self) -> None:
+        env_configs: dict[str, object] = {
             "provider": {
                 "data": "postgres",
                 "storage": "s3",
@@ -151,7 +163,7 @@ class EnvConfig(Config):
         super().__init__(env_configs)
 
 
-def get_config(name):
+def get_config(name: str) -> Config | None:
     """
     Returns the `Config` object registered to the given name or `None` if the
     name is not registered.
@@ -159,19 +171,19 @@ def get_config(name):
     return __config__.get(name)
 
 
-def from_json(name, fname):
+def from_json(name: str, fname: str) -> Config:
     """
     Registers a new `Config` object with the given name, read from a JSON file. Returns
     the created `Config` object.
     """
     with open(fname, "r") as config_file:
-        config_dict = json.load(config_file)
+        config_dict = cast(dict[str, object], json.load(config_file))
         c = Config(config_dict)
         __config__[name] = c
         return c
 
 
-def from_dict(name, d):
+def from_dict(name: str, d: dict[str, object]) -> Config:
     """
     Registers a new config with the given name, built from a regular `dict`.
     Returns the created `Config` object.
@@ -181,7 +193,7 @@ def from_dict(name, d):
     return c
 
 
-def from_env(name):
+def from_env(name: str) -> Config:
     """
     Registers a new config with the given name, building it from environment variables.
     """
@@ -190,8 +202,8 @@ def from_env(name):
     return c
 
 
-def _check_dict(d):
+def _check_dict(d: object) -> None:
     if not isinstance(d, dict):
         raise TypeError("Given argument is not a dict")
-    if not all(isinstance(key, str) for key in d.keys()):
+    if not all(isinstance(key, str) for key in cast(dict[object, object], d)):
         raise TypeError("All dictionary keys must be strings")

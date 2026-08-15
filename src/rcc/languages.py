@@ -1,15 +1,22 @@
-from typing import List, Optional
+from collections.abc import Iterable
+from typing import override
 
 IMAGE_FORMAT = "ghcr.io/runcodes-icmc/compiler-images-%s:latest"
 
 
 class Language:
     name: str
-    extensions: List[str]
+    extensions: list[str]
     compilable: bool
     image: str
 
-    def __init__(self, name, extensions, compilable=True, image_name=None):
+    def __init__(
+        self,
+        name: str | None,
+        extensions: Iterable[str],
+        compilable: bool = True,
+        image_name: str | None = None,
+    ) -> None:
         if name is None:
             raise ValueError("Language name must not be None")
 
@@ -22,16 +29,18 @@ class Language:
         self.image = IMAGE_FORMAT % (image_name or self.name.lower())
 
     @property
-    def standard_extension(self):
+    def standard_extension(self) -> str | None:
         if len(self.extensions) == 0:
             return None
 
         return self.extensions[0]
 
-    def __str__(self):
+    @override
+    def __str__(self) -> str:
         return f"Language({self.name}): [{', '.join(self.extensions)}] - {self.image}"
 
-    def __repr__(self):
+    @override
+    def __repr__(self) -> str:
         return str(self)
 
 
@@ -39,7 +48,7 @@ class Language:
 # Known Languages #
 ###################
 
-KNOWN_LANGUAGES = [
+KNOWN_LANGUAGES: list[Language] = [
     Language("C", ["c", "h"]),
     Language("C++", ["cpp", "cc", "cxx", "c++", "hpp", "h"], image_name="cpp"),
     Language("C#", ["cs"], image_name="dotnet"),
@@ -73,7 +82,7 @@ KNOWN_LANGUAGES = [
 ]
 
 # Build lookup table for language extensions
-_LANGUAGE_EXTENSIONS_MAPPING = {}
+_LANGUAGE_EXTENSIONS_MAPPING: dict[str, Language | None] = {}
 for lang in KNOWN_LANGUAGES:
     for ext in lang.extensions:
         # Avoid ambiguous extensions
@@ -83,7 +92,7 @@ for lang in KNOWN_LANGUAGES:
             _LANGUAGE_EXTENSIONS_MAPPING[ext] = lang
 
 
-def language_from_extension(ext_or_filename: str) -> Optional[Language]:
+def language_from_extension(ext_or_filename: str) -> Language | None:
     """Retrieve the language associated with the given extension.
 
     Args:

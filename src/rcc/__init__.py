@@ -1,25 +1,23 @@
-from __future__ import unicode_literals
+from __future__ import annotations, unicode_literals
 
 import argparse
 import asyncio
 import logging
 import logging.handlers
 import multiprocessing as mp
+import multiprocessing.queues as mp_queues
 import sys
 import time
+from typing import cast
 
-from six.moves import range
-
-import rcc.config
-import rcc.engine
-import rcc.provider
-import rcc.provider.data
-import rcc.util
+from . import config, util
+from .model import Commit
+from .provider import data
 
 
-def parse_args():
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="The run.codes compiler")
-    parser.add_argument(
+    _ = parser.add_argument(
         "--config",
         type=str,
         help="Path to configuration file or config mode.",
@@ -28,7 +26,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def setup_logger(name, log_config):
+def setup_logger(name: str, log_config: dict[str, object] | None) -> logging.Logger:
     # NOTE: should we handle multiprocessing?
     logger = logging.getLogger(name)
     logger.setLevel(logging.DEBUG)
@@ -46,20 +44,22 @@ def setup_logger(name, log_config):
         fmt = "%(asctime)s [%(levelname)s] <%(process)d> %(message)s"
         formatter = logging.Formatter(fmt)
         handler = logging.handlers.TimedRotatingFileHandler(
-            log_config["file"], when="D"
+            str(log_config["file"]), when="D"
         )
-        handler.setLevel(log_config["level"])
+        handler.setLevel(str(log_config["level"]))
         handler.setFormatter(formatter)
         logger.addHandler(handler)
 
     return logger
 
 
-def commit_filter(_):
+def commit_filter(_: Commit) -> bool:
     return True
 
 
-def _select_new_commits(commits, recently_enqueued, suppression):
+def select_new_commits(
+    commits: list[Commit], recently_enqueued: dict[int, float], suppression: float
+) -> list[Commit]:
     """Filter out recently enqueued commits and prune stale tracking entries.
 
     ``recently_enqueued`` maps a commit id to the ``time.monotonic()`` value
@@ -79,7 +79,11 @@ def _select_new_commits(commits, recently_enqueued, suppression):
     return [commit for commit in commits if commit.id not in recently_enqueued]
 
 
-async def _stop_workers(engine_workers, task_queue, logger):
+async def _stop_workers(
+    engine_workers: list[mp.Process],
+    task_queue: mp_queues.JoinableQueue[Commit | None],
+    logger: logging.Logger,
+) -> None:
     """Ask the workers to stop and wait for them to finish.
 
     The ``None`` hints are put through a thread: the task queue is bounded,
@@ -103,15 +107,15 @@ async def _stop_workers(engine_workers, task_queue, logger):
             worker.terminate()
 
 
-def _total_slots(cfg):
+def _total_slots(cfg: config.Config) -> int:
     """Total number of commits that may be in flight across all workers."""
     concurrency = int(
-        cfg.get("concurrency_per_worker", rcc.config.DEFAULT_CONCURRENCY_PER_WORKER)
+        str(cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER))
     )
-    return int(cfg.num_workers) * concurrency
+    return int(str(cfg.num_workers)) * concurrency
 
 
-def _task_queue_maxsize(cfg):
+def task_queue_maxsize(cfg: config.Config) -> int:
     """Capacity of the bounded task queue: 2x the total commit slots.
 
     The factor of two gives the pipeline some headroom while still letting a
@@ -121,39 +125,47 @@ def _task_queue_maxsize(cfg):
     return 2 * _total_slots(cfg)
 
 
-async def main():
-    args = parse_args()
-    if args.config == "env":
-        cfg = rcc.config.from_env(rcc.config.DEFAULT_CONFIG)
+async def main() -> None:
+    # Imported here (and not at module level) to break the import cycle:
+    # rcc.engine imports submodules of this package.
+    from . import engine
+
+    args = vars(parse_args())
+    config_arg = str(args.get("config"))
+    if config_arg == "env":
+        cfg = config.from_env(config.DEFAULT_CONFIG)
     else:
-        cfg = rcc.config.from_json(rcc.config.DEFAULT_CONFIG, args.config)
+        cfg = config.from_json(config.DEFAULT_CONFIG, config_arg)
 
-    logger = setup_logger(rcc.config.DEFAULT_LOGGER, cfg.log)
+    log_config = cast(dict[str, object], cfg.log) if isinstance(cfg.log, dict) else None
+    logger = setup_logger(config.DEFAULT_LOGGER, log_config)
 
-    with rcc.util.SingletonContext(cfg.lock_file):
+    with util.SingletonContext(cast(str, cfg.lock_file)):
         logger.info("Started")
         logger.debug("Configuration: {}".format(cfg))
 
         # Provides acccess to metadata on things such as commits, exercises,
         # test cases, etc.
-        data_provider = rcc.provider.data.from_config(cfg)
+        data_provider = data.from_config(cfg)
 
         # Queue and workers used to distribute the workload of commit processing.
         # The queue is bounded (2x the commit slots across all workers): a
         # blocking put() is the backpressure mechanism that replaces the old
         # per-batch join() barrier. Putting is offloaded to a thread so that a
         # full queue never blocks the event loop.
-        task_queue = mp.JoinableQueue(maxsize=_task_queue_maxsize(cfg))
+        task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue(
+            maxsize=task_queue_maxsize(cfg)
+        )
         engine_workers = [
-            mp.Process(
-                target=rcc.engine.run_worker, args=(data_provider, task_queue, cfg)
-            )
-            for _ in range(cfg.num_workers)
+            mp.Process(target=engine.run_worker, args=(data_provider, task_queue, cfg))
+            for _ in range(cast(int, cfg.num_workers))
         ]
 
         # Poll for new commits and put them in our internal processing queue
         try:
-            sleeper = rcc.util.Sleeper(cfg.min_sleep_time, cfg.max_sleep_time)
+            sleeper = util.Sleeper(
+                cast(float, cfg.min_sleep_time), cast(float, cfg.max_sleep_time)
+            )
             for worker in engine_workers:
                 worker.start()
 
@@ -171,12 +183,14 @@ async def main():
             # put on it again and again. Worker-side claiming already makes
             # such duplicates harmless; this only avoids wasting queue
             # capacity and claim round trips on them. See
-            # :func:`_select_new_commits` for the pruning rules.
-            recently_enqueued = {}
+            # :func:`select_new_commits` for the pruning rules.
+            recently_enqueued: dict[int, float] = {}
             commit_suppression = float(
-                cfg.get(
-                    "commit_enqueue_suppression",
-                    rcc.config.DEFAULT_COMMIT_ENQUEUE_SUPPRESSION,
+                str(
+                    cfg.get(
+                        "commit_enqueue_suppression",
+                        config.DEFAULT_COMMIT_ENQUEUE_SUPPRESSION,
+                    )
                 )
             )
 
@@ -184,7 +198,7 @@ async def main():
                 try:
                     commits = await data_provider.fetch_commits_in_queue()
                     commits = list(filter(commit_filter, commits))
-                    commits = _select_new_commits(
+                    commits = select_new_commits(
                         commits, recently_enqueued, commit_suppression
                     )
                 except Exception:

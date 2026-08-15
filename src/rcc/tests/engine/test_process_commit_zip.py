@@ -1,17 +1,20 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 import logging
 import sys
 import unittest
 import zipfile
+from typing import TextIO, cast, override
 
 import tests.engine.test_process_commit_hello as hello
-from six import StringIO
 
 import rcc.config
 import rcc.engine
 import rcc.provider.storage
-from rcc.model import Commit
+from rcc.languages import Language
+from rcc.model import Commit, TestCase
 
 make_c = """
 all:
@@ -94,7 +97,9 @@ run:
 """
 
 
-def build_commit(commit_id, user_email, fname, language_name):
+def build_commit(
+    commit_id: int, user_email: str, fname: str, language_name: str | None
+) -> Commit:
     return Commit(
         commit_id,
         user_email,
@@ -117,15 +122,16 @@ def build_commit(commit_id, user_email, fname, language_name):
         1,
         1,
         fname,
-        language_name,
+        cast(Language, cast(object, language_name)),
     )
 
 
 class MockStorageProvider(rcc.provider.storage.StorageProvider):
-    def __init__(self, cfg):
+    def __init__(self, cfg: rcc.config.Config) -> None:
         pass
 
-    def fetch_commit_file(self, commit, destination):
+    @override
+    def fetch_commit_file(self, commit: Commit, destination: str) -> None:
         sources = [
             hello.hello_c_src,
             hello.hello_cpp_src,
@@ -157,35 +163,46 @@ class MockStorageProvider(rcc.provider.storage.StorageProvider):
             src_fname = ".".join(("hello", names[commit.id - 1]))
             src_code = sources[commit.id - 1]
             make = makes[commit.id - 1]
-            with StringIO():
-                zip_file.writestr(src_fname, src_code)
-                zip_file.writestr("Makefile", make)
+            zip_file.writestr(src_fname, src_code)
+            zip_file.writestr("Makefile", make)
 
-    def fetch_exercise_file(self, source, destination):
+    @override
+    def fetch_exercise_file(self, source: str, destination: str) -> None:
         pass
 
-    def fetch_test_case_input_file(self, test_case, destination):
+    @override
+    def fetch_test_case_input_file(self, test_case: TestCase, destination: str) -> None:
         if test_case.id == 5432:
             with open(destination, "w") as in_file:
-                in_file.write("This input should be ignored.\n")
+                _ = in_file.write("This input should be ignored.\n")
 
-    def fetch_test_case_output_file(self, test_case, destination):
+    @override
+    def fetch_test_case_output_file(
+        self, test_case: TestCase, destination: str
+    ) -> None:
         if test_case.id == 5432:
             with open(destination, "w") as out_file:
-                out_file.write("Hello, run.codes!\n")
+                _ = out_file.write("Hello, run.codes!\n")
 
-    def fetch_test_case_files(self, test_case, destination):
+    @override
+    def fetch_test_case_files(self, test_case: TestCase, destination: str) -> None:
         pass
 
-    def store_commit_output(self, commit, commit_output_fname):
+    @override
+    def store_commit_output(self, commit: Commit, commit_output_fname: str) -> None:
         pass
 
 
 class TestEngineZip(unittest.TestCase):
-    def setUp(self):
+    data_prov: hello.MockDataProvider = hello.MockDataProvider()
+    storage_provider_class: object = rcc.provider.storage.S3
+    handler: logging.StreamHandler[TextIO] = logging.StreamHandler(sys.stdout)
+
+    @override
+    def setUp(self) -> None:
         self.data_prov = hello.MockDataProvider()
-        self.S3Provider = rcc.provider.storage.S3
-        rcc.provider.storage.S3 = MockStorageProvider
+        self.storage_provider_class = rcc.provider.storage.S3
+        setattr(rcc.provider.storage, "S3", MockStorageProvider)
         # Ensure configuration is registered for tests
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         if cfg is None:
@@ -198,35 +215,36 @@ class TestEngineZip(unittest.TestCase):
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.addHandler(self.handler)
 
-    def tearDown(self):
-        rcc.provider.storage.S3 = self.S3Provider
+    @override
+    def tearDown(self) -> None:
+        setattr(rcc.provider.storage, "S3", self.storage_provider_class)
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 
-    def run_test_process_commit(self, commit):
+    def run_test_process_commit(self, commit: Commit) -> None:
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
         self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
         self.assertEqual(commit.score, 10)
         self.assertEqual(commit.corrects, 1)
 
-    def test_process_commit_zip_c(self):
+    def test_process_commit_zip_c(self) -> None:
         commit = build_commit(1, "c", "hello.zip", "Zip/Makefile")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_zip_cpp(self):
+    def test_process_commit_zip_cpp(self) -> None:
         commit = build_commit(2, "cpp", "hello.zip", "Zip/Makefile")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_zip_f90(self):
+    def test_process_commit_zip_f90(self) -> None:
         commit = build_commit(3, "f90", "hello.zip", "Zip/Makefile")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_zip_hs(self):
+    def test_process_commit_zip_hs(self) -> None:
         commit = build_commit(4, "hs", "hello.zip", "Zip/Makefile")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_zip_java(self):
+    def test_process_commit_zip_java(self) -> None:
         commit = build_commit(5, "java", "hello.zip", "Zip/Makefile")
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))

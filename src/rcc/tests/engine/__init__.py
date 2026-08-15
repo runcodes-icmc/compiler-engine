@@ -1,9 +1,10 @@
 import rcc.config
 
-rcc.config.from_dict(
+_ = rcc.config.from_dict(
     rcc.config.DEFAULT_CONFIG,
     {
         "exec_dir": "/var/runcodes/runs",
+        "exec_dir_remote": "/var/runcodes/runs",
         "src_dir": "src",
         "output_files_dir": "outputfiles",
         "compilation_error_file": "compilation.err",
@@ -13,5 +14,7 @@ rcc.config.from_dict(
         "monitor_max_file_size": 5242880,
         "monitor_max_mem_size": 268435456,
         "container_cfg_file": "container.config",
+        "max_output_file_size": 1048576,
+        "cleanup_on_error": False,
     },
 )

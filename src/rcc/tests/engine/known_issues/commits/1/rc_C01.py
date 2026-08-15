@@ -1,3 +1,4 @@
+# pyright: basic
 while True:
     while True:
         peso = float(input("Peso (kg): "))

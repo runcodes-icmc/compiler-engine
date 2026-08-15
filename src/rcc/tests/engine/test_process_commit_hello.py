@@ -1,15 +1,19 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 import logging
 import os
 import sys
 import unittest
+from typing import TextIO, cast, override
 
 import rcc.config
 import rcc.engine
 import rcc.provider.data
 import rcc.provider.storage
-from rcc.model import Commit, TestCase
+from rcc.languages import Language
+from rcc.model import Commit, TestCase, TestCaseResult
 
 hello_c_src = """
 #include <stdio.h>
@@ -85,7 +89,9 @@ cat("Hello, run.codes!\\n")
 """
 
 
-def build_commit(commit_id, user_email, fname, language_name):
+def build_commit(
+    commit_id: int, user_email: str, fname: str, language_name: str | None
+) -> Commit:
     return Commit(
         commit_id,
         user_email,
@@ -108,15 +114,18 @@ def build_commit(commit_id, user_email, fname, language_name):
         1,
         1,
         fname,
-        language_name,
+        cast(Language, cast(object, language_name)),
     )
 
 
 class MockStorageProvider(rcc.provider.storage.StorageProvider):
-    def __init__(self, cfg):
+    def __init__(self, cfg: rcc.config.Config) -> None:
         pass
 
-    def fetch_commit_file(self, commit, destination):
+    @override
+    def fetch_commit_file(self, commit: Commit, destination: str) -> None:
+        if commit.fname is None:
+            raise ValueError("Test commit has no filename")
         with open(destination, "w") as src_file:
             _, extension = os.path.splitext(commit.fname)
             extension = extension[1:]
@@ -137,61 +146,85 @@ class MockStorageProvider(rcc.provider.storage.StorageProvider):
             elif extension == "por":
                 src_code = hello_por_src
             elif extension == "py":
-                if commit.language_name == "Python 2":
+                language = cast(str, cast(object, commit.language))
+                if language == "Python 2":
                     src_code = hello_py2_src
-                elif commit.language_name == "Python 3":
+                elif language == "Python 3":
                     src_code = hello_py3_src
                 else:
                     raise ValueError("Invalid commit")
             elif extension == "r":
                 src_code = hello_r_src
-            src_file.write(src_code)
+            else:
+                raise ValueError("Invalid commit")
+            _ = src_file.write(src_code)
 
-    def fetch_exercise_file(self, source, destination):
+    @override
+    def fetch_exercise_file(self, source: str, destination: str) -> None:
         pass
 
-    def fetch_test_case_input_file(self, test_case, destination):
+    @override
+    def fetch_test_case_input_file(self, test_case: TestCase, destination: str) -> None:
         if test_case.id == 5432:
             with open(destination, "w") as in_file:
-                in_file.write("This input should be ignored.\n")
+                _ = in_file.write("This input should be ignored.\n")
 
-    def fetch_test_case_output_file(self, test_case, destination):
+    @override
+    def fetch_test_case_output_file(
+        self, test_case: TestCase, destination: str
+    ) -> None:
         if test_case.id == 5432:
             with open(destination, "w") as out_file:
-                out_file.write("Hello, run.codes!\n")
+                _ = out_file.write("Hello, run.codes!\n")
 
-    def fetch_test_case_files(self, test_case, destination):
+    @override
+    def fetch_test_case_files(self, test_case: TestCase, destination: str) -> None:
         pass
 
-    def store_commit_output(self, commit, commit_output_fname):
+    @override
+    def store_commit_output(self, commit: Commit, commit_output_fname: str) -> None:
         pass
 
 
 class MockDataProvider(rcc.provider.data.DataProvider):
-    def __init__(self):
+    num_calls_update_commit: int
+    num_calls_store_commit_test_results: int
+    num_calls_delete_commit_test_results: int
+    num_calls_fetch_exercise_files: int
+    num_calls_fetch_test_cases: int
+
+    def __init__(self) -> None:
         self.num_calls_update_commit = 0
         self.num_calls_store_commit_test_results = 0
         self.num_calls_delete_commit_test_results = 0
         self.num_calls_fetch_exercise_files = 0
         self.num_calls_fetch_test_cases = 0
 
-    async def fetch_commits_in_queue(self):
-        pass
+    @override
+    async def fetch_commits_in_queue(self) -> list[Commit]:
+        return []
 
-    async def update_commit(self, commit):
+    @override
+    async def update_commit(self, commit: Commit) -> None:
         self.num_calls_update_commit += 1
 
-    async def store_commit_test_results(self, commit, test_results):
+    @override
+    async def store_commit_test_results(
+        self, commit: Commit, test_results: list[TestCaseResult]
+    ) -> None:
         self.num_calls_store_commit_test_results += 1
 
-    async def delete_commit_test_results(self, commit):
+    @override
+    async def delete_commit_test_results(self, commit: Commit) -> None:
         self.num_calls_delete_commit_test_results += 1
 
-    async def fetch_exercise_files(self, commit):
+    @override
+    async def fetch_exercise_files(self, commit: Commit) -> list[str]:
         self.num_calls_fetch_exercise_files += 1
         return []
 
-    async def fetch_test_cases(self, commit):
+    @override
+    async def fetch_test_cases(self, commit: Commit) -> list[TestCase]:
         self.num_calls_fetch_test_cases += 1
         return [
             TestCase(
@@ -213,10 +246,15 @@ class MockDataProvider(rcc.provider.data.DataProvider):
 
 
 class TestEngineHello(unittest.TestCase):
-    def setUp(self):
+    data_prov: MockDataProvider = MockDataProvider()
+    storage_from_config: object = rcc.provider.storage.from_config
+    handler: logging.StreamHandler[TextIO] = logging.StreamHandler(sys.stderr)
+
+    @override
+    def setUp(self) -> None:
         self.data_prov = MockDataProvider()
         self.storage_from_config = rcc.provider.storage.from_config
-        rcc.provider.storage.from_config = MockStorageProvider
+        setattr(rcc.provider.storage, "from_config", MockStorageProvider)
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         if cfg is None:
             # Register a default configuration for tests
@@ -231,58 +269,59 @@ class TestEngineHello(unittest.TestCase):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(self.handler)
 
-    def tearDown(self):
-        rcc.provider.storage.from_config = self.storage_from_config
+    @override
+    def tearDown(self) -> None:
+        setattr(rcc.provider.storage, "from_config", self.storage_from_config)
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 
-    def run_test_process_commit(self, commit):
+    def run_test_process_commit(self, commit: Commit) -> None:
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
         self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
         self.assertEqual(commit.score, 10)
         self.assertEqual(commit.corrects, 1)
 
-    def test_process_commit_hello_c(self):
+    def test_process_commit_hello_c(self) -> None:
         commit = build_commit(1, "c", "hello.c", "C")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_cpp(self):
+    def test_process_commit_hello_cpp(self) -> None:
         commit = build_commit(2, "cpp", "hello.cpp", "C++")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_f90(self):
+    def test_process_commit_hello_f90(self) -> None:
         commit = build_commit(3, "f90", "hello.f90", "Fortran")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_hs(self):
+    def test_process_commit_hello_hs(self) -> None:
         commit = build_commit(4, "hs", "hello.hs", "Haskell")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_java(self):
+    def test_process_commit_hello_java(self) -> None:
         commit = build_commit(5, "java", "hello.java", "Java")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_m(self):
+    def test_process_commit_hello_m(self) -> None:
         commit = build_commit(6, "m", "hello.m", "Octave")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_pas(self):
+    def test_process_commit_hello_pas(self) -> None:
         commit = build_commit(7, "pas", "hello.pas", "Pascal")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_por(self):
+    def test_process_commit_hello_por(self) -> None:
         commit = build_commit(8, "por", "hello.por", "Portugol")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_py2(self):
+    def test_process_commit_hello_py2(self) -> None:
         commit = build_commit(9, "py2", "hello.py", "Python 2")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_py3(self):
+    def test_process_commit_hello_py3(self) -> None:
         commit = build_commit(10, "py3", "hello.py", "Python 3")
         self.run_test_process_commit(commit)
 
-    def test_process_commit_hello_r(self):
+    def test_process_commit_hello_r(self) -> None:
         commit = build_commit(11, "r", "hello.r", "R")
         self.run_test_process_commit(commit)

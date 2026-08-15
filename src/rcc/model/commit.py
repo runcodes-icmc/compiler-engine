@@ -1,43 +1,77 @@
 from __future__ import unicode_literals
 
+import datetime
+from typing import TYPE_CHECKING, override
+
+if TYPE_CHECKING:
+    from ..languages import Language
+
 
 class Commit:
-    STATUS_IN_QUEUE = 0
-    STATUS_COMPILING = 1
-    STATUS_COMPILED = 2
-    STATUS_RUNNING = 3
-    STATUS_INCOMPLETE = 4
-    STATUS_COMPLETED = 5
-    STATUS_ERROR = 6
-    STATUS_INTERNAL_ERROR = 9
-    STATUS_RUNNING = 10
-    STATUS_PROCESSING = 11
+    STATUS_IN_QUEUE: int = 0
+    STATUS_COMPILING: int = 1
+    STATUS_COMPILED: int = 2
+    STATUS_RUNNING: int = 10
+    STATUS_INCOMPLETE: int = 4
+    STATUS_COMPLETED: int = 5
+    STATUS_ERROR: int = 6
+    STATUS_INTERNAL_ERROR: int = 9
+    STATUS_PROCESSING: int = 11
+
+    id: int
+    user_email: str
+    exercise_id: int
+    real_exercise_id: int
+    status: int
+    commit_hash: str
+    corrects: int
+    score: float
+    is_compiled: bool
+    compiled_message: str
+    commit_time: datetime.datetime
+    compilation_started_time: datetime.datetime | None
+    compilation_finished_time: datetime.datetime | None
+    compiled_signal: str | int | None
+    compiled_error: str
+    user_ip: str | None
+    aws_key: str
+    offering_id: int
+    real_offering_id: int
+    course_id: int
+    is_make: bool
+    fname: str | None
+    language: Language | None
+    # Derived while processing (see rcc.engine.set_extension / copy_source_files).
+    extension: str | None
+    is_compilable: bool
+    # Free-form metadata attached by some tests.
+    test_cases: object
 
     def __init__(
         self,
-        commit_id,
-        user_email,
-        exercise_id,
-        real_exercise_id,
-        status,
-        commit_hash,
-        corrects,
-        score,
-        is_compiled,
-        compiled_message,
-        commit_time,
-        compilation_started_time,
-        compilation_finished_time,
-        compiled_signal,
-        compiled_error,
-        user_ip,
-        aws_key,
-        offering_id,
-        real_offering_id,
-        course_id,
-        fname=None,
-        language=None,
-    ):
+        commit_id: int,
+        user_email: str,
+        exercise_id: int,
+        real_exercise_id: int,
+        status: int,
+        commit_hash: str,
+        corrects: int,
+        score: float,
+        is_compiled: bool,
+        compiled_message: str,
+        commit_time: datetime.datetime,
+        compilation_started_time: datetime.datetime | None,
+        compilation_finished_time: datetime.datetime | None,
+        compiled_signal: str | int | None,
+        compiled_error: str,
+        user_ip: str | None,
+        aws_key: str,
+        offering_id: int,
+        real_offering_id: int,
+        course_id: int,
+        fname: str | None = None,
+        language: Language | None = None,
+    ) -> None:
         self.id = commit_id
         self.user_email = user_email
         self.exercise_id = exercise_id
@@ -61,8 +95,11 @@ class Commit:
         self.is_make = False
         self.fname = fname
         self.language = language
+        self.extension = None
+        self.is_compilable = False
+        self.test_cases = None
 
-    def reset(self):
+    def reset(self) -> None:
         self.score = 0.0
         self.corrects = 0
         self.is_compiled = False
@@ -73,7 +110,8 @@ class Commit:
         self.compiled_error = ""
         self.status = Commit.STATUS_PROCESSING
 
-    def __str__(self):
+    @override
+    def __str__(self) -> str:
         s = (
             "Commit("
             "id={}, "

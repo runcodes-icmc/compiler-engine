@@ -1,6 +1,5 @@
 import unittest
-
-from six import StringIO
+from io import StringIO
 
 import rcc.cmp
 

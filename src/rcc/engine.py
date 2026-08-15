@@ -1,4 +1,4 @@
-from __future__ import division, print_function, unicode_literals
+from __future__ import annotations, division, print_function, unicode_literals
 
 import asyncio
 import configparser
@@ -6,22 +6,29 @@ import datetime
 import filecmp
 import itertools as it
 import logging
+import multiprocessing.queues as mp_queues
 import os
 import queue
 import shutil
 import sys
 import threading
 import zipfile
+from collections.abc import Iterable
+from typing import TYPE_CHECKING, cast
 
 import docker
 import requests
 
-import rcc.cmp
-import rcc.config
-import rcc.provider
-import rcc.provider.storage
-import rcc.util
-from rcc.model import Commit, TestCase, TestCaseResult
+import rcc.cmp as cmp
+import rcc.config as config
+import rcc.util as util
+
+from .model import Commit, TestCase, TestCaseResult
+from .provider import storage
+
+if TYPE_CHECKING:
+    from .provider.data import DataProvider
+    from .provider.storage import StorageProvider
 
 DEFAULT_MKDIR_PERMISSIONS = 0o777
 
@@ -41,13 +48,22 @@ CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 PREFETCH_MAX_CONCURRENT_DOWNLOADS = 8
 
 
-def set_extension(commit):
+def _get_config() -> config.Config:
+    """Return the registered default configuration, raising if none exists."""
+    cfg = config.get_config(config.DEFAULT_CONFIG)
+    if cfg is None:
+        raise RuntimeError("No default configuration registered")
+    return cfg
+
+
+def set_extension(commit: Commit) -> None:
+    if commit.fname is None:
+        raise ValueError("Commit has no filename; cannot deduce its extension")
     _, extension = os.path.splitext(commit.fname)
-    extension = rcc.util.standardize_extension(extension[1:])
-    commit.extension = extension
+    commit.extension = util.standardize_extension(extension[1:])
 
 
-def _raise_first_error(results):
+def _raise_first_error(results: Iterable[BaseException | None]) -> None:
     """Re-raise the first exception in a ``gather(return_exceptions=True)`` list.
 
     Used after each concurrent download batch: every in-flight download has
@@ -59,7 +75,7 @@ def _raise_first_error(results):
             raise result
 
 
-def _mark_task_done(task):
+def _mark_task_done(task: asyncio.Task[None]) -> None:
     """Retrieve a finished task's outcome (suppress 'never retrieved' warnings).
 
     Used on background tasks whose result may never be awaited on some paths
@@ -67,10 +83,10 @@ def _mark_task_done(task):
     the task later still yields the same result/exception.
     """
     if not task.cancelled():
-        task.exception()
+        _ = task.exception()
 
 
-async def _await_task(task):
+async def _await_task(task: asyncio.Task[None]) -> Exception | None:
     """Await ``task`` and return its exception, or ``None`` on success.
 
     Non-Exception BaseExceptions (e.g. CancelledError) propagate, so a
@@ -83,7 +99,9 @@ async def _await_task(task):
     return None
 
 
-async def download_commit_file(storage_provider, commit, base_dir):
+async def download_commit_file(
+    storage_provider: StorageProvider, commit: Commit, base_dir: str
+) -> None:
     """Download the commit source file into ``<base_dir>/<cfg.src_dir>``.
 
     Split out of :func:`copy_source_files` so the download can start
@@ -92,10 +110,10 @@ async def download_commit_file(storage_provider, commit, base_dir):
     earlier, because the download needs it); the zip extraction in
     :func:`copy_source_files` still runs only after this completes.
     """
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-    if cfg is None:
-        raise RuntimeError("No default configuration registered")
-    src_dir = os.path.join(base_dir, cfg.src_dir)
+    if commit.fname is None:
+        raise ValueError("Commit has no filename; cannot download its source file")
+    cfg = _get_config()
+    src_dir = os.path.join(base_dir, str(cfg.src_dir))
     os.makedirs(src_dir, DEFAULT_MKDIR_PERMISSIONS)
     destination = os.path.join(src_dir, os.path.basename(commit.fname))
     # boto3 download runs in a worker thread
@@ -103,8 +121,12 @@ async def download_commit_file(storage_provider, commit, base_dir):
 
 
 async def copy_source_files(
-    data_provider, storage_provider, commit, base_dir, semaphore
-):
+    data_provider: DataProvider,
+    storage_provider: StorageProvider,
+    commit: Commit,
+    base_dir: str,
+    semaphore: asyncio.Semaphore,
+) -> None:
     """Copy the exercise's extra source files into ``<base_dir>/<cfg.src_dir>``.
 
     The commit file itself was already downloaded concurrently with the
@@ -112,26 +134,31 @@ async def copy_source_files(
     below is unchanged. Exercise-file downloads are independent of each other
     and run concurrently, bounded by ``semaphore``.
     """
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-    if cfg is None:
-        raise RuntimeError("No default configuration registered")
-    src_dir = os.path.join(base_dir, cfg.src_dir)
-    destination = os.path.join(src_dir, os.path.basename(commit.fname))
+    fname = commit.fname
+    if fname is None:
+        raise ValueError("Commit has no filename; cannot copy its source files")
+    cfg = _get_config()
+    src_dir = os.path.join(base_dir, str(cfg.src_dir))
+    destination = os.path.join(src_dir, os.path.basename(fname))
 
     # Add info about file extension and whether the submission is compilable
     set_extension(commit)
-    if commit.extension == "zip":
+    extension = commit.extension
+    if extension == "zip":
         # Extra tasks if we have a zip (extract, deduce language of files)
         with zipfile.ZipFile(destination) as zip_file:
-            commit.extension = rcc.util.deduce_language(zip_file)
-            commit.language = rcc.util.language_from_extension(commit.extension)
+            extension = util.deduce_language(zip_file)
+            commit.extension = extension
+            commit.language = util.language_from_extension(extension)
             zip_file.extractall(src_dir)
-    commit.is_compilable = rcc.util.is_compilable(commit.extension)
+    elif extension is not None:
+        commit.language = util.language_from_extension(extension)
+    commit.is_compilable = util.is_compilable(extension)
 
     # Copy files uploaded with exercise
     fnames = await data_provider.fetch_exercise_files(commit)
 
-    async def copy_exercise_file(fname):
+    async def copy_exercise_file(fname: str) -> None:
         source = os.path.join(str(commit.real_exercise_id), fname)
         file_destination = os.path.join(src_dir, os.path.basename(fname))
         async with semaphore:
@@ -145,7 +172,12 @@ async def copy_source_files(
     _raise_first_error(results)
 
 
-async def copy_test_case_files(storage_provider, test_cases, base_dir, semaphore):
+async def copy_test_case_files(
+    storage_provider: StorageProvider,
+    test_cases: list[TestCase],
+    base_dir: str,
+    semaphore: asyncio.Semaphore,
+) -> None:
     """Download every test case's input and additional files concurrently.
 
     Each test case's downloads are independent of the others', so one task per
@@ -154,7 +186,7 @@ async def copy_test_case_files(storage_provider, test_cases, base_dir, semaphore
     downloaded, exactly where it was in the sequential version.
     """
 
-    async def copy_one(test_case):
+    async def copy_one(test_case: TestCase) -> None:
         # Copy test case input file (boto3 call in a worker thread)
         dest = os.path.join(base_dir, "{}.in".format(test_case.id))
         async with semaphore:
@@ -176,9 +208,11 @@ async def copy_test_case_files(storage_provider, test_cases, base_dir, semaphore
     _raise_first_error(results)
 
 
-def create_container_cfg_file(commit, test_cases, base_dir):
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-    container_cfg = [
+def create_container_cfg_file(
+    commit: Commit, test_cases: list[TestCase], base_dir: str
+) -> None:
+    cfg = _get_config()
+    container_cfg: list[tuple[str, object, bool]] = [
         ("monitor_max_fs", cfg.monitor_max_file_size, False),
         ("monitor_max_ms", cfg.monitor_max_mem_size, False),
         ("compilation_timeout", cfg.compilation_timeout, False),
@@ -187,7 +221,7 @@ def create_container_cfg_file(commit, test_cases, base_dir):
     container_cfg.extend(
         [("t_{}".format(test.id), test.cpu_time, False) for test in test_cases]
     )
-    with open(os.path.join(base_dir, cfg.container_cfg_file), "w") as cfg_file:
+    with open(os.path.join(base_dir, str(cfg.container_cfg_file)), "w") as cfg_file:
         for cfg_item in container_cfg:
             if cfg_item[2]:  # should quote?
                 print("{c[0]}='{c[1]}'".format(c=cfg_item), file=cfg_file)
@@ -195,25 +229,33 @@ def create_container_cfg_file(commit, test_cases, base_dir):
                 print("{c[0]}={c[1]}".format(c=cfg_item), file=cfg_file)
 
 
-def diff(user_fname, test_fname, output_type, abs_error):
+def diff(
+    user_fname: str, test_fname: str, output_type: int, abs_error: float | None
+) -> int:
     if output_type == TestCase.IO_TYPE_TEXT:
-        if rcc.cmp.text_cmp(user_fname, test_fname):
+        if cmp.text_cmp(user_fname, test_fname):
             return TestCaseResult.STATUS_CORRECT
-        elif rcc.cmp.text_cmp2(user_fname, test_fname):
+        elif cmp.text_cmp2(user_fname, test_fname):
             return TestCaseResult.STATUS_MALFORMED
         return TestCaseResult.STATUS_INCORRECT
     elif output_type == TestCase.IO_TYPE_NUMERIC:
-        if rcc.cmp.number_cmp(user_fname, test_fname, abs_error):
+        if cmp.number_cmp(user_fname, test_fname, abs_error or 0.0):
             return TestCaseResult.STATUS_CORRECT
         return TestCaseResult.STATUS_INCORRECT
     elif output_type == TestCase.IO_TYPE_BINARY:
         if filecmp.cmp(user_fname, test_fname, shallow=False):
             return TestCaseResult.STATUS_CORRECT
         return TestCaseResult.STATUS_INCORRECT
+    raise ValueError("Unknown test case output type: {}".format(output_type))
 
 
-def process_test_results(storage_provider, commit, test_case, base_dir):
-    logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+def process_test_results(
+    storage_provider: StorageProvider,
+    commit: Commit,
+    test_case: TestCase,
+    base_dir: str,
+) -> TestCaseResult:
+    logger = logging.getLogger(config.DEFAULT_LOGGER)
     user_out_fname = os.path.join(base_dir, "{}.output".format(test_case.id))
     user_err_fname = os.path.join(base_dir, "{}.error".format(test_case.id))
     run_info_fname = os.path.join(base_dir, "{}.monitor_out".format(test_case.id))
@@ -273,9 +315,16 @@ class ContainerLogReader:
     """
 
     # Sentinel pushed once the log stream ends.
-    END = object()
+    END: object = object()
 
-    def __init__(self, logs_generator, loop):
+    _generator: Iterable[bytes | str]
+    _loop: asyncio.AbstractEventLoop
+    _queue: asyncio.Queue[object]
+    _thread: threading.Thread
+
+    def __init__(
+        self, logs_generator: Iterable[bytes | str], loop: asyncio.AbstractEventLoop
+    ) -> None:
         self._generator = logs_generator
         self._loop = loop
         self._queue = asyncio.Queue()
@@ -285,11 +334,11 @@ class ContainerLogReader:
             daemon=True,
         )
 
-    def start(self):
+    def start(self) -> None:
         """Start the reader thread."""
         self._thread.start()
 
-    def stop(self):
+    def stop(self) -> None:
         """Best-effort wait for the reader thread to terminate.
 
         The thread ends on its own once the generator is exhausted (which
@@ -299,36 +348,37 @@ class ContainerLogReader:
         if self._thread.is_alive():
             self._thread.join(timeout=CONTAINER_LOG_READER_JOIN_TIMEOUT)
 
-    async def get(self):
+    async def get(self) -> object:
         """Return the next decoded log line, or ``END`` when the stream ended."""
         return await self._queue.get()
 
-    def _push(self, item):
+    def _push(self, item: object) -> bool:
         """Schedule an item for the loop thread; False if the loop is closing."""
         try:
-            self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
+            _ = self._loop.call_soon_threadsafe(self._queue.put_nowait, item)
             return True
         except RuntimeError:
             # Event loop is closed (worker shutting down): stop reading.
             return False
 
-    def _read_loop(self):
+    def _read_loop(self) -> None:
         try:
             for raw in self._generator:
-                if isinstance(raw, bytes):
-                    raw = raw.decode("utf8")
-                if not self._push(raw.strip()):
+                line = raw.decode("utf8") if isinstance(raw, bytes) else raw
+                if not self._push(line.strip()):
                     break
         except Exception as e:
             # The generator raised (connection dropped, decode error, ...):
             # treat the stream as ended.
-            logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+            logger = logging.getLogger(config.DEFAULT_LOGGER)
             logger.debug("Container log stream terminated: %s", e)
         finally:
-            self._push(self.END)
+            _ = self._push(self.END)
 
 
-async def expect_message(log_reader, expected, timeout):
+async def expect_message(
+    log_reader: ContainerLogReader, expected: str, timeout: float
+) -> None:
     """Wait for the next line of the container's log stream to be ``expected``.
 
     Reads decoded, stripped lines from the :class:`ContainerLogReader` queue.
@@ -345,7 +395,13 @@ async def expect_message(log_reader, expected, timeout):
         raise RuntimeError("Expected `{}`, got `{}`".format(expected, message))
 
 
-async def run(data_provider, commit, test_cases, base_dir, remote_dir):
+async def run(
+    data_provider: DataProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    base_dir: str,
+    remote_dir: str,
+) -> None:
     """Run the submitted code in a container, streaming its log messages.
 
     Every blocking docker SDK call (client creation, container start, the log
@@ -357,23 +413,29 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
     A fresh docker client is created per commit: each concurrent task gets its
     own client, which also sidesteps docker-py thread-safety questions.
     """
-    logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+    logger = logging.getLogger(config.DEFAULT_LOGGER)
+    cfg = _get_config()
 
     client = await asyncio.to_thread(docker.from_env)
-    volumes = {
+    volumes: dict[str, dict[str, str]] = {
         remote_dir: {"bind": "/root", "mode": "rw"},
     }
+    language = commit.language
+    if language is None:
+        raise RuntimeError("Commit has no language; cannot start its container")
     container = await asyncio.to_thread(
         client.containers.run,
-        commit.language.image,
+        language.image,
         detach=True,
         remove=False,
         volumes=volumes,
     )
 
     log_reader = ContainerLogReader(
-        await asyncio.to_thread(container.logs, stream=True),
+        cast(
+            Iterable[bytes],
+            await asyncio.to_thread(container.logs, stream=True),
+        ),
         asyncio.get_running_loop(),
     )
     log_reader.start()
@@ -383,7 +445,9 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
             try:
                 # Compilation start
                 await expect_message(
-                    log_reader, "compilation.start", cfg.compilation_timeout
+                    log_reader,
+                    "compilation.start",
+                    cast(float, cfg.compilation_timeout),
                 )
 
                 commit.status = Commit.STATUS_COMPILING
@@ -391,10 +455,10 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
 
                 # Compilation done
                 await expect_message(
-                    log_reader, "compilation.done", cfg.compilation_timeout
+                    log_reader, "compilation.done", cast(float, cfg.compilation_timeout)
                 )
 
-                err_fname = os.path.join(base_dir, cfg.compilation_error_file)
+                err_fname = os.path.join(base_dir, str(cfg.compilation_error_file))
                 # 'replace' is used because the compiler output may include text from
                 # the user-submitted file, which we have no control of
                 with open(err_fname, errors="replace") as err_file:
@@ -420,7 +484,9 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
         if commit.status != Commit.STATUS_ERROR:
             try:
                 # Test cases execution start
-                base_timeout = cfg.base_exec_timeout * (1 + len(test_cases))
+                base_timeout = cast(float, cfg.base_exec_timeout) * (
+                    1 + len(test_cases)
+                )
                 timeout = base_timeout + sum(c.cpu_time for c in test_cases)
                 await expect_message(log_reader, "run.start", timeout)
 
@@ -433,7 +499,9 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
                 logger.warning("Execution timed out", exc_info=True)
                 raise RuntimeError("Execution timed out")
         try:
-            await asyncio.to_thread(container.wait, timeout=cfg.base_exec_timeout)
+            _ = await asyncio.to_thread(
+                container.wait, timeout=cast(float, cfg.base_exec_timeout)
+            )
         except requests.exceptions.ReadTimeout:
             logger.error("Container wait timed out", exc_info=True)
             await asyncio.to_thread(container.kill)
@@ -448,8 +516,13 @@ async def run(data_provider, commit, test_cases, base_dir, remote_dir):
 
 
 async def run_tests(
-    data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
-):
+    data_provider: DataProvider,
+    storage_provider: StorageProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    base_dir: str,
+    remote_dir: str,
+) -> list[TestCaseResult]:
     """Run the submitted code in a container and collect the test results.
 
     Runs on the caller's event loop (previously a fresh event loop was created
@@ -468,7 +541,12 @@ async def run_tests(
     )
 
 
-def process_test_results_batch(storage_provider, commit, test_cases, base_dir):
+def process_test_results_batch(
+    storage_provider: StorageProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    base_dir: str,
+) -> list[TestCaseResult]:
     """Run :func:`process_test_results` for every test case (sync helper).
 
     Called through ``asyncio.to_thread``: the per-case S3 downloads inside
@@ -480,19 +558,20 @@ def process_test_results_batch(storage_provider, commit, test_cases, base_dir):
     ]
 
 
-def prepare_output_file(commit, base_dir):
-    def should_truncate(fname):
+def prepare_output_file(commit: Commit, base_dir: str) -> str:
+    cfg = _get_config()
+
+    def should_truncate(fname: str) -> bool:
         return fname.endswith((".output", ".error"))
 
-    def truncate(fname):
+    def truncate(fname: str) -> None:
         with open(fname, "a") as f:
             size = f.seek(0, 2)
-            if size > cfg.max_output_file_size:
-                f.seek(0, 0)
-                f.truncate(cfg.max_output_file_size)
+            if size > cast(int, cfg.max_output_file_size):
+                _ = f.seek(0, 0)
+                _ = f.truncate(cast(int, cfg.max_output_file_size))
 
-    cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-    output_dir = os.path.join(base_dir, cfg.output_files_dir)
+    output_dir = os.path.join(base_dir, str(cfg.output_files_dir))
     output_fname = os.path.join(base_dir, "{}.zip".format(commit.id))
     with zipfile.ZipFile(output_fname, "w") as output_file:
         for dir_path, _, fnames in os.walk(output_dir):
@@ -506,16 +585,18 @@ def prepare_output_file(commit, base_dir):
     return output_fname
 
 
-def compute_score(commit, test_cases, test_results):
+def compute_score(
+    commit: Commit, test_cases: list[TestCase], test_results: list[TestCaseResult]
+) -> None:
     if commit.status == Commit.STATUS_ERROR:
         commit.corrects = 0
         commit.score = 0
         return
 
-    def is_correct(test_result):
+    def is_correct(test_result: TestCaseResult) -> bool:
         return test_result.status == TestCaseResult.STATUS_CORRECT
 
-    commit.corrects = rcc.util.count_if(is_correct, test_results)
+    commit.corrects = util.count_if(is_correct, test_results)
     # Score starts at 10 and is reduced proportionally to the number of
     # incorrect test cases
     commit.score = 10.0
@@ -527,17 +608,18 @@ def compute_score(commit, test_cases, test_results):
         commit.status = Commit.STATUS_INCOMPLETE
 
 
-def cleanup_tests(base_dir):
+def cleanup_tests(base_dir: str) -> None:
     if os.path.isdir(base_dir):
+        # Errors propagate: no error handler is passed, so rmtree() raises on
+        # the first failure. The previous onexc handler re-raised the same
+        # exception, which is equivalent but crashed on Python 3.12+ where
+        # the handler receives the exception itself, not a 3-tuple.
+        shutil.rmtree(base_dir)
 
-        def rmtree_handler(_func, _path, exc_info):
-            exc_type, exc_value, _ = exc_info
-            raise exc_type(exc_value)
 
-        shutil.rmtree(base_dir, onexc=rmtree_handler)
-
-
-async def process_commit(data_provider, commit, cfg=None):
+async def process_commit(
+    data_provider: DataProvider, commit: Commit, cfg: config.Config | None = None
+) -> None:
     """Process a single commit: compile it, run its test cases, store results.
 
     Fully async: every interaction with the data provider is awaited. Runs on
@@ -550,35 +632,36 @@ async def process_commit(data_provider, commit, cfg=None):
     concurrently behind a semaphore.
     """
     if cfg is None:
-        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        cfg = config.get_config(config.DEFAULT_CONFIG)
     if cfg is None:
         # No configuration was passed and none is registered.
         raise RuntimeError("No default configuration registered")
-    logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+    logger = logging.getLogger(config.DEFAULT_LOGGER)
     logger.debug(
-        "[{c.id}]"
-        " user_email={c.user_email}"
-        ", exercise_id={c.exercise_id}"
-        ", commit_time={c.commit_time}".format(c=commit)
+        "[{c.id}] user_email={c.user_email}, exercise_id={c.exercise_id}, commit_time={c.commit_time}".format(
+            c=commit
+        )
     )
 
     try:
-        storage_provider = rcc.provider.storage.from_config(cfg)
+        storage_provider = storage.from_config(cfg)
     except Exception:
         logger.error("[{c.id}] Storage provider error".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         return
 
-    base_dir = os.path.join(cfg.exec_dir, "commit_{}".format(commit.id))
-    remote_dir = os.path.join(cfg.exec_dir_remote, "commit_{}".format(commit.id))
+    base_dir = os.path.join(cast(str, cfg.exec_dir), "commit_{}".format(commit.id))
+    remote_dir = os.path.join(
+        cast(str, cfg.exec_dir_remote), "commit_{}".format(commit.id)
+    )
 
     # Bound for the prefetch S3 downloads: mirror the per-worker commit
     # concurrency so a worker never opens more simultaneous downloads than it
     # has in-flight commits, capped at a sane small maximum (and never zero,
     # which would deadlock every download).
     concurrency = int(
-        cfg.get("concurrency_per_worker", rcc.config.DEFAULT_CONCURRENCY_PER_WORKER)
+        str(cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER))
     )
     download_semaphore = asyncio.Semaphore(
         max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
@@ -597,7 +680,7 @@ async def process_commit(data_provider, commit, cfg=None):
         commit.reset()
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
-        if cfg.cleanup_on_error:
+        if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
 
@@ -625,7 +708,7 @@ async def process_commit(data_provider, commit, cfg=None):
     #   * the download's failure surfaces later through the original
     #     "prepare runs" error path, exactly where the sequential version
     #     raised it.
-    async def fetch_commit_file():
+    async def fetch_commit_file() -> None:
         await download_commit_file(storage_provider, commit, base_dir)
 
     # The download runs concurrently with the DB pair; its outcome is
@@ -643,39 +726,39 @@ async def process_commit(data_provider, commit, cfg=None):
         return_exceptions=True,
     )
 
-    # A non-Exception BaseException (e.g. CancelledError) must never be
-    # treated as a provider failure: propagate it unchanged.
-    if isinstance(test_cases, BaseException) and not isinstance(test_cases, Exception):
-        download_task.cancel()
+    if isinstance(test_cases, BaseException):
+        if isinstance(test_cases, Exception):
+            # The delete and the download ran concurrently with the failed
+            # fetch; wait for the download (so the cleanup below cannot race
+            # its worker thread) and log any failure, so nothing is silently
+            # swallowed.
+            download_error = await _await_task(download_task)
+            for step_error in (delete_error, download_error):
+                if isinstance(step_error, Exception):
+                    logger.error(
+                        "[{c.id}] Concurrent prefetch step failed".format(c=commit),
+                        exc_info=step_error,
+                    )
+            logger.error(
+                "[{c.id}] Failed to fetch test cases".format(c=commit),
+                exc_info=test_cases,
+            )
+            commit.status = Commit.STATUS_INTERNAL_ERROR
+            await data_provider.update_commit(commit)
+            if bool(cfg.cleanup_on_error):
+                cleanup_tests(base_dir)
+            return
+        # A non-Exception BaseException (e.g. CancelledError) must never be
+        # treated as a provider failure: propagate it unchanged.
+        _ = download_task.cancel()
         raise test_cases
-    if isinstance(test_cases, Exception):
-        # The delete and the download ran concurrently with the failed
-        # fetch; wait for the download (so the cleanup below cannot race its
-        # worker thread) and log any failure, so nothing is silently
-        # swallowed.
-        download_error = await _await_task(download_task)
-        for step_error in (delete_error, download_error):
-            if isinstance(step_error, Exception):
-                logger.error(
-                    "[{c.id}] Concurrent prefetch step failed".format(c=commit),
-                    exc_info=(type(step_error), step_error, step_error.__traceback__),
-                )
-        logger.error(
-            "[{c.id}] Failed to fetch test cases".format(c=commit),
-            exc_info=(type(test_cases), test_cases, test_cases.__traceback__),
-        )
-        commit.status = Commit.STATUS_INTERNAL_ERROR
-        await data_provider.update_commit(commit)
-        if cfg.cleanup_on_error:
-            cleanup_tests(base_dir)
-        return
 
     if delete_error is not None:
         # Wait for the in-flight download so a later retry's cleanup cannot
         # race its worker thread, then propagate exactly like the sequential
         # version (which had no try/except here: the commit stays in the
         # queue and is retried).
-        await _await_task(download_task)
+        _ = await _await_task(download_task)
         raise delete_error
 
     commit.reset()
@@ -702,7 +785,7 @@ async def process_commit(data_provider, commit, cfg=None):
         logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
-        if cfg.cleanup_on_error:
+        if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
 
@@ -715,7 +798,7 @@ async def process_commit(data_provider, commit, cfg=None):
         logger.error("[{c.id}] Failed to run tests".format(c=commit), exc_info=True)
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
-        if cfg.cleanup_on_error:
+        if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
     logger.debug("[{c.id}] Done testing".format(c=commit))
@@ -741,13 +824,17 @@ async def process_commit(data_provider, commit, cfg=None):
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
-        if cfg.cleanup_on_error:
+        if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
     logger.debug("[{c.id}] Commit processing done".format(c=commit))
 
 
-async def process_commits(data_provider, commit_queue, cfg=None):
+async def process_commits(
+    data_provider: DataProvider,
+    commit_queue: mp_queues.JoinableQueue[Commit | None],
+    cfg: config.Config | None = None,
+) -> None:
     """Worker main loop: pull commits from the queue and process them.
 
     Producer/consumer structure: a single loop pulls commits from the queue
@@ -773,7 +860,7 @@ async def process_commits(data_provider, commit_queue, cfg=None):
     process) and closed when the worker stops.
     """
     # Set up logging for worker process
-    logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
+    logger = logging.getLogger(config.DEFAULT_LOGGER)
 
     # Only add handlers if logger doesn't have any (worker processes don't inherit parent's handlers)
     if not logger.handlers:
@@ -790,18 +877,20 @@ async def process_commits(data_provider, commit_queue, cfg=None):
     # Register configuration if provided
     if cfg is not None:
         # Access the underlying configuration dictionary
-        rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, cfg.get_dict())
+        _ = config.from_dict(config.DEFAULT_CONFIG, cfg.get_dict())
     else:
-        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
+        cfg = config.get_config(config.DEFAULT_CONFIG)
 
     if cfg is None:
         # No configuration was passed and none is registered: fall back to
         # the default concurrency (process_commit() would fail on the missing
         # configuration anyway).
-        concurrency = rcc.config.DEFAULT_CONCURRENCY_PER_WORKER
+        concurrency = config.DEFAULT_CONCURRENCY_PER_WORKER
     else:
         concurrency = int(
-            cfg.get("concurrency_per_worker", rcc.config.DEFAULT_CONCURRENCY_PER_WORKER)
+            str(
+                cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER)
+            )
         )
 
     # exceptions that stop the worker
@@ -824,12 +913,12 @@ async def process_commits(data_provider, commit_queue, cfg=None):
     # Caps the number of commits processed concurrently by this worker.
     semaphore = asyncio.Semaphore(concurrency)
     # Registry of in-flight commit tasks: drained before the worker exits.
-    in_flight = set()
+    in_flight: set[asyncio.Task[None]] = set()
     # Set when a commit raises a non-retryable exception: the pull loop stops
     # spawning new work and exits after the in-flight commits are drained.
     fatal = asyncio.Event()
 
-    async def run_commit(commit):
+    async def run_commit(commit: Commit) -> None:
         try:
             # Claim the commit atomically before processing it. The poller
             # can enqueue the same commit more than once (a commit stays
@@ -870,7 +959,7 @@ async def process_commits(data_provider, commit_queue, cfg=None):
             semaphore.release()
 
     try:
-        with rcc.util.UninterruptibleContext():
+        with util.UninterruptibleContext():
             while True:
                 if fatal.is_set():
                     break
@@ -894,7 +983,7 @@ async def process_commits(data_provider, commit_queue, cfg=None):
                         # Stop hint: mark the empty task as done (finally
                         # block) and drain the in-flight commits.
                         break
-                    await semaphore.acquire()
+                    _ = await semaphore.acquire()
                     try:
                         task = asyncio.create_task(run_commit(commit))
                     except BaseException:
@@ -914,14 +1003,18 @@ async def process_commits(data_provider, commit_queue, cfg=None):
 
             # Drain: wait for every in-flight commit before exiting.
             if in_flight:
-                await asyncio.gather(*in_flight)
+                _ = await asyncio.gather(*in_flight)
     finally:
         await data_provider.close()
 
     logger.debug("Worker stopped")
 
 
-def run_worker(data_provider, commit_queue, cfg=None):
+def run_worker(
+    data_provider: DataProvider,
+    commit_queue: mp_queues.JoinableQueue[Commit | None],
+    cfg: config.Config | None = None,
+) -> None:
     """Sync entry point for the worker ``multiprocessing.Process`` target.
 
     Each worker process starts its own event loop (and, through it, its own

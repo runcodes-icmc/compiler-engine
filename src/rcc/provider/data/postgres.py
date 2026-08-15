@@ -2,14 +2,15 @@ from __future__ import unicode_literals
 
 import base64
 import datetime
+from typing import cast, override
 
 import psycopg
 import psycopg.conninfo
 from psycopg_pool import AsyncConnectionPool
 
-from rcc.languages import language_from_extension
-
-from ...model import Commit, TestCase
+from ...config import Config
+from ...languages import language_from_extension
+from ...model import Commit, TestCase, TestCaseResult
 from .data_provider import DataProvider
 
 
@@ -28,38 +29,47 @@ class Postgres(DataProvider):
     stripped when this object is pickled (see :meth:`__getstate__`).
     """
 
-    def __init__(self, cfg):
+    _conninfo: str
+    _pool_min_size: int
+    _pool_max_size: int
+    _pool_timeout: float
+    _pool: AsyncConnectionPool[psycopg.AsyncConnection] | None
+
+    def __init__(self, cfg: Config) -> None:
+        db = cast(dict[str, object], cfg.db)
         self._conninfo = psycopg.conninfo.make_conninfo(
-            host=cfg.db["host"],
-            port=cfg.db["port"],
-            dbname=cfg.db["name"],
-            user=cfg.db["username"],
-            password=cfg.db["password"],
+            host=cast(str, db["host"]),
+            port=cast(int, db["port"]),
+            dbname=cast(str, db["name"]),
+            user=cast(str, db["username"]),
+            password=cast(str, db["password"]),
         )
         # Pool sizing: every process performs its DB work sequentially (the
         # main poller runs one query per poll cycle, each worker one commit
         # at a time), so one connection is enough for the steady state. The
         # maximum is a safety margin for transient overlap and is tunable
         # through configuration/environment variables.
-        self._pool_min_size = int(cfg.db.get("pool_min_size", 1))
-        self._pool_max_size = int(cfg.db.get("pool_max_size", 10))
-        self._pool_timeout = float(cfg.db.get("pool_timeout", 30.0))
-        self._pool: AsyncConnectionPool[psycopg.AsyncConnection] | None = None
+        self._pool_min_size = int(str(db.get("pool_min_size", 1)))
+        self._pool_max_size = int(str(db.get("pool_max_size", 10)))
+        self._pool_timeout = float(str(db.get("pool_timeout", 30.0)))
+        self._pool = None
 
-    def __getstate__(self):
+    @override
+    def __getstate__(self) -> dict[str, object]:
         # A pool holds live connections, threads and background tasks and
         # cannot be pickled or forked. Every process must open its own pool
         # by calling `open()` after the process has started.
-        state = self.__dict__.copy()
+        state: dict[str, object] = self.__dict__.copy()
         state["_pool"] = None
         return state
 
     @property
-    def is_open(self):
+    def is_open(self) -> bool:
         """Whether the connection pool has been opened."""
         return self._pool is not None
 
-    async def open(self):
+    @override
+    async def open(self) -> None:
         """Create and open the connection pool. Idempotent.
 
         The pool is opened with ``wait=False``: connections are established
@@ -76,7 +86,7 @@ class Postgres(DataProvider):
             min_size=self._pool_min_size,
             max_size=self._pool_max_size,
             timeout=self._pool_timeout,
-            configure=self._configure_connection,
+            configure=self.configure_connection,
             open=False,
         )
         self._pool = pool
@@ -86,14 +96,15 @@ class Postgres(DataProvider):
             self._pool = None
             raise
 
-    async def close(self):
+    @override
+    async def close(self) -> None:
         """Close the connection pool, releasing every pooled connection."""
         pool, self._pool = self._pool, None
         if pool is not None:
             await pool.close()
 
     @staticmethod
-    async def _configure_connection(conn: psycopg.AsyncConnection) -> None:
+    async def configure_connection(conn: psycopg.AsyncConnection) -> None:
         # psycopg3 starts an implicit transaction on the first statement, and
         # `async with pool.connection()` commits it on clean exit and rolls
         # it back on error. Keep autocommit off so that this matches the
@@ -111,36 +122,38 @@ class Postgres(DataProvider):
         return self._pool
 
     @staticmethod
-    def commit_from_row(row):
+    def commit_from_row(row: tuple[object, ...]) -> Commit:
         real_exercise_id = row[18] if row[17] else row[2]
-        slash_index = row[15].rfind("/")
-        fname = row[15][slash_index + 1 :]
+        aws_key = cast(str, row[15])
+        slash_index = aws_key.rfind("/")
+        fname = aws_key[slash_index + 1 :]
         c = Commit(
-            row[0],  # id
-            row[1],  # user_email
-            row[2],  # exercise_id
-            real_exercise_id,  # real_exercise_id
-            row[3],  # status
-            row[4],  # hash
-            row[5],  # corrects
-            row[6],  # score
-            row[7],  # compiled
-            row[8],  # compiled_message
-            row[9],  # commit_time
-            row[10],  # compilation_started
-            row[11],  # compilation_finished
-            row[12],  # compiled_signal
-            row[13],  # compiled_error
-            row[14],  # ip
-            row[15],  # aws_key
-            row[16],  # offering_id
-            row[20],  # real_offering_id
-            row[19],  # course_id
+            cast(int, row[0]),  # id
+            cast(str, row[1]),  # user_email
+            cast(int, row[2]),  # exercise_id
+            cast(int, real_exercise_id),  # real_exercise_id
+            cast(int, row[3]),  # status
+            cast(str, row[4]),  # hash
+            cast(int, row[5]),  # corrects
+            cast(float, row[6]),  # score
+            cast(bool, row[7]),  # compiled
+            cast(str, row[8]),  # compiled_message
+            cast(datetime.datetime, row[9]),  # commit_time
+            cast(datetime.datetime | None, row[10]),  # compilation_started
+            cast(datetime.datetime | None, row[11]),  # compilation_finished
+            cast(str | int | None, row[12]),  # compiled_signal
+            cast(str, row[13]),  # compiled_error
+            cast(str, row[14]),  # ip
+            aws_key,  # aws_key
+            cast(int, row[16]),  # offering_id
+            cast(int, row[20]),  # real_offering_id
+            cast(int, row[19]),  # course_id
             fname,
         )
         return c
 
-    async def fetch_commits_in_queue(self):
+    @override
+    async def fetch_commits_in_queue(self) -> list[Commit]:
         query = (
             "SELECT com.id"
             "     , com.user_email"
@@ -178,8 +191,8 @@ class Postgres(DataProvider):
         )
 
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(query, (Commit.STATUS_IN_QUEUE,))
-            commits = []
+            _ = await cursor.execute(query, (Commit.STATUS_IN_QUEUE,))
+            commits: list[Commit] = []
             async for row in cursor:
                 commits.append(Postgres.commit_from_row(row))
 
@@ -188,7 +201,8 @@ class Postgres(DataProvider):
                 commit.language = language_from_extension(commit.fname)
         return commits
 
-    async def update_commit(self, commit):
+    @override
+    async def update_commit(self, commit: Commit) -> None:
         query = (
             "UPDATE commits SET"
             " user_email = %s,"
@@ -230,9 +244,12 @@ class Postgres(DataProvider):
             commit.id,
         )
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(query, data)
+            _ = await cursor.execute(query, data)
 
-    async def store_commit_test_results(self, commit, test_results):
+    @override
+    async def store_commit_test_results(
+        self, commit: Commit, test_results: list[TestCaseResult]
+    ) -> None:
         query = (
             "INSERT INTO commits_exercise_cases(commit_id"
             "                                 , exercise_case_id"
@@ -261,14 +278,16 @@ class Postgres(DataProvider):
                     test_case_result.status_message,
                     test_case_result.error,
                 )  # unused
-                await cursor.execute(query, data)
+                _ = await cursor.execute(query, data)
 
-    async def delete_commit_test_results(self, commit):
+    @override
+    async def delete_commit_test_results(self, commit: Commit) -> None:
         query = "DELETE FROM commits_exercise_cases WHERE commit_id = %s"
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(query, (commit.id,))
+            _ = await cursor.execute(query, (commit.id,))
 
-    async def claim_commit(self, commit):
+    @override
+    async def claim_commit(self, commit: Commit) -> bool:
         """Atomically mark an ``STATUS_IN_QUEUE`` commit as PROCESSING.
 
         The poller can enqueue the same commit more than once (a commit
@@ -286,7 +305,7 @@ class Postgres(DataProvider):
             " WHERE id = %s AND status = %s"
         )
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(
+            _ = await cursor.execute(
                 query,
                 (
                     Commit.STATUS_PROCESSING,
@@ -297,7 +316,8 @@ class Postgres(DataProvider):
             )
             return cursor.rowcount == 1
 
-    async def release_commit(self, commit):
+    @override
+    async def release_commit(self, commit: Commit) -> None:
         """Return a claimed commit to the queue (PROCESSING -> IN_QUEUE).
 
         Only called by the worker that holds the claim, after a retryable
@@ -311,37 +331,39 @@ class Postgres(DataProvider):
             " WHERE id = %s AND status = %s"
         )
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(
+            _ = await cursor.execute(
                 query,
                 (Commit.STATUS_IN_QUEUE, commit.id, Commit.STATUS_PROCESSING),
             )
 
-    async def fetch_exercise_files(self, commit):
+    @override
+    async def fetch_exercise_files(self, commit: Commit) -> list[str]:
         query = "SELECT path FROM compilation_files WHERE exercise_id = %s"
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
-            await cursor.execute(query, (commit.real_exercise_id,))
-            return [row[0] async for row in cursor]
+            _ = await cursor.execute(query, (commit.real_exercise_id,))
+            return [cast(str, row[0]) async for row in cursor]
 
     @staticmethod
-    def test_case_from_row(row):
+    def test_case_from_row(row: tuple[object, ...]) -> TestCase:
         t = TestCase(
-            row[0],
-            row[1],
-            row[2],
-            row[3],
-            row[4],
-            row[5],
-            row[6],
-            row[7],
-            row[8],
-            row[9],
-            row[10],
-            row[11],
+            cast(int, row[0]),
+            cast(int, row[1]),
+            cast(int, row[2]),
+            cast(int, row[3]),
+            cast(bool, row[4]),
+            cast(bool, row[5]),
+            cast(int, row[6]),
+            cast(int, row[7]),
+            cast(int, row[8]),
+            cast(bool, row[9]),
+            cast(int, row[10]),
+            cast(float | None, row[11]),
             row[12],
         )
         return t
 
-    async def fetch_test_cases(self, commit):
+    @override
+    async def fetch_test_cases(self, commit: Commit) -> list[TestCase]:
         query = (
             "SELECT id"
             "     , exercise_id"
@@ -374,20 +396,22 @@ class Postgres(DataProvider):
         )
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
             # Fetch test case metadata
-            await cursor.execute(query, (commit.real_exercise_id,))
-            test_cases = []
+            _ = await cursor.execute(query, (commit.real_exercise_id,))
+            test_cases: list[TestCase] = []
             async for row in cursor:
                 test_cases.append(Postgres.test_case_from_row(row))
             # Fetch the list of files of every test case in a single round
             # trip (skipped when the exercise has no test cases: an empty
             # array would be a pointless round trip).
             if test_cases:
-                await cursor.execute(
+                _ = await cursor.execute(
                     files_query, ([test_case.id for test_case in test_cases],)
                 )
-                files_by_case = {}
+                files_by_case: dict[object, list[str]] = {}
                 async for row in cursor:
-                    files_by_case.setdefault(row[0], []).append(row[1])
+                    files_by_case.setdefault(cast(object, row[0]), []).append(
+                        cast(str, row[1])
+                    )
                 for test_case in test_cases:
                     test_case.files = files_by_case.get(test_case.id, [])
             return test_cases

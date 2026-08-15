@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import datetime
 import logging
@@ -5,12 +7,14 @@ import os
 import shutil
 import sys
 import unittest
+from typing import NotRequired, TextIO, TypedDict, cast, override
 
 import rcc.config
 import rcc.engine
 import rcc.provider.data
 import rcc.provider.storage
-from rcc.model import Commit, TestCase
+from rcc.languages import Language
+from rcc.model import Commit, TestCase, TestCaseResult
 
 # Metadata sample
 # {
@@ -31,7 +35,29 @@ from rcc.model import Commit, TestCase
 #        ],
 #    },
 # }
-commit_metadata = [
+
+
+class TestCaseMetadata(TypedDict):
+    id: int
+    out_type: int
+    files: NotRequired[list[str]]
+
+
+class ExerciseMetadata(TypedDict):
+    id: int
+    test_cases: list[TestCaseMetadata]
+
+
+class CommitMetadata(TypedDict):
+    id: int
+    user_email: str
+    fname: str
+    language_name: str
+    expected_status: int
+    exercise: ExerciseMetadata
+
+
+commit_metadata: list[CommitMetadata] = [
     {
         "id": 1,
         "user_email": "Python 3 input() issue",
@@ -102,12 +128,13 @@ commit_metadata = [
 ]
 
 
-def build_commit(metadata):
+def build_commit(metadata: CommitMetadata) -> Commit:
+    exercise = metadata["exercise"]
     c = Commit(
         metadata["id"],
         metadata["user_email"],
-        metadata["exercise"]["id"],
-        metadata["exercise"]["id"],
+        exercise["id"],
+        exercise["id"],
         Commit.STATUS_IN_QUEUE,
         "",
         0,
@@ -125,39 +152,55 @@ def build_commit(metadata):
         1,
         1,
         metadata["fname"],
-        metadata["language_name"],
+        cast(
+            Language, cast(object, metadata["language_name"])
+        ),  # placeholder; set_extension fixes it
     )
-    c.test_cases = metadata["exercise"]["test_cases"]
+    c.test_cases = exercise["test_cases"]
     return c
 
 
 class MockDataProvider(rcc.provider.data.DataProvider):
-    def __init__(self):
+    num_calls_update_commit: int
+    num_calls_store_commit_test_results: int
+    num_calls_delete_commit_test_results: int
+    num_calls_fetch_exercise_files: int
+    num_calls_fetch_test_cases: int
+
+    def __init__(self) -> None:
         self.num_calls_update_commit = 0
         self.num_calls_store_commit_test_results = 0
         self.num_calls_delete_commit_test_results = 0
         self.num_calls_fetch_exercise_files = 0
         self.num_calls_fetch_test_cases = 0
 
-    async def fetch_commits_in_queue(self):
-        pass
+    @override
+    async def fetch_commits_in_queue(self) -> list[Commit]:
+        return []
 
-    async def update_commit(self, commit):
+    @override
+    async def update_commit(self, commit: Commit) -> None:
         self.num_calls_update_commit += 1
 
-    async def store_commit_test_results(self, commit, test_results):
+    @override
+    async def store_commit_test_results(
+        self, commit: Commit, test_results: list[TestCaseResult]
+    ) -> None:
         self.num_calls_store_commit_test_results += 1
 
-    async def delete_commit_test_results(self, commit):
+    @override
+    async def delete_commit_test_results(self, commit: Commit) -> None:
         self.num_calls_delete_commit_test_results += 1
 
-    async def fetch_exercise_files(self, commit):
+    @override
+    async def fetch_exercise_files(self, commit: Commit) -> list[str]:
         self.num_calls_fetch_exercise_files += 1
         return []
 
-    async def fetch_test_cases(self, commit):
-        test_cases = []
-        for test_case_metadata in commit.test_cases:
+    @override
+    async def fetch_test_cases(self, commit: Commit) -> list[TestCase]:
+        test_cases: list[TestCase] = []
+        for test_case_metadata in cast(list[TestCaseMetadata], commit.test_cases):
             test_case = TestCase(
                 test_case_metadata["id"],
                 commit.real_exercise_id,
@@ -179,36 +222,47 @@ class MockDataProvider(rcc.provider.data.DataProvider):
 
 
 class MockStorageProvider(rcc.provider.storage.StorageProvider):
-    def __init__(self, cfg):
+    dirname: str
+
+    def __init__(self, cfg: rcc.config.Config) -> None:
         self.dirname = os.path.dirname(os.path.realpath(__file__))
         pass
 
-    def fetch_commit_file(self, commit, destination):
+    @override
+    def fetch_commit_file(self, commit: Commit, destination: str) -> None:
+        if commit.fname is None:
+            raise ValueError("Test commit has no filename")
         source = os.path.join(self.dirname, "commits", str(commit.id), commit.fname)
-        shutil.copyfile(source, destination)
+        _ = shutil.copyfile(source, destination)
 
-    def fetch_exercise_file(self, source, destination):
+    @override
+    def fetch_exercise_file(self, source: str, destination: str) -> None:
         pass
 
-    def fetch_test_case_input_file(self, test_case, destination):
+    @override
+    def fetch_test_case_input_file(self, test_case: TestCase, destination: str) -> None:
         source = os.path.join(
             self.dirname,
             "exercises",
             str(test_case.exercise_id),
             ".".join([str(test_case.id), "in"]),
         )
-        shutil.copyfile(source, destination)
+        _ = shutil.copyfile(source, destination)
 
-    def fetch_test_case_output_file(self, test_case, destination):
+    @override
+    def fetch_test_case_output_file(
+        self, test_case: TestCase, destination: str
+    ) -> None:
         source = os.path.join(
             self.dirname,
             "exercises",
             str(test_case.exercise_id),
             ".".join([str(test_case.id), "out"]),
         )
-        shutil.copyfile(source, destination)
+        _ = shutil.copyfile(source, destination)
 
-    def fetch_test_case_files(self, test_case, destination):
+    @override
+    def fetch_test_case_files(self, test_case: TestCase, destination: str) -> None:
         for fname in test_case.files:
             source = os.path.join(
                 self.dirname,
@@ -217,17 +271,23 @@ class MockStorageProvider(rcc.provider.storage.StorageProvider):
                 str(test_case.id),
                 fname,
             )
-            shutil.copyfile(source, os.path.join(destination, fname))
+            _ = shutil.copyfile(source, os.path.join(destination, fname))
 
-    def store_commit_output(self, commit, commit_output_fname):
+    @override
+    def store_commit_output(self, commit: Commit, commit_output_fname: str) -> None:
         pass
 
 
 class TestEngineKnownIssues(unittest.TestCase):
-    def setUp(self):
+    data_prov: MockDataProvider = MockDataProvider()
+    storage_provider_class: object = rcc.provider.storage.S3
+    handler: logging.StreamHandler[TextIO] = logging.StreamHandler(sys.stdout)
+
+    @override
+    def setUp(self) -> None:
         self.data_prov = MockDataProvider()
-        self.S3Provider = rcc.provider.storage.S3
-        rcc.provider.storage.S3 = MockStorageProvider
+        self.storage_provider_class = rcc.provider.storage.S3
+        setattr(rcc.provider.storage, "S3", MockStorageProvider)
         self.handler = logging.StreamHandler(sys.stdout)
         self.handler.setLevel(logging.DEBUG)
         self.handler.setFormatter(
@@ -237,12 +297,13 @@ class TestEngineKnownIssues(unittest.TestCase):
         logger.setLevel(logging.DEBUG)
         logger.addHandler(self.handler)
 
-    def tearDown(self):
-        rcc.provider.storage.S3 = self.S3Provider
+    @override
+    def tearDown(self) -> None:
+        setattr(rcc.provider.storage, "S3", self.storage_provider_class)
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 
-    def test_process_commit_known_issues(self):
+    def test_process_commit_known_issues(self) -> None:
         for metadata in commit_metadata:
             commit = build_commit(metadata)
             with self.subTest(name=commit.user_email):
