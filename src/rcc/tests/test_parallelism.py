@@ -20,7 +20,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable, Iterable
-from typing import ClassVar, Self, cast, override
+from typing import ClassVar, Protocol, Self, cast, override
 from unittest import mock
 
 import rcc
@@ -183,17 +183,35 @@ class ClaimingProvider(TrackingProvider):
         self.claimed.discard(commit.id)
 
 
+class _SemLock(Protocol):
+    """Shape of ``multiprocessing.synchronize.SemLock`` (not in typeshed)."""
+
+    def _get_value(self) -> int: ...
+
+
+class _CounterSemaphore(Protocol):
+    """Shape of the ``Semaphore`` counting unfinished JoinableQueue tasks."""
+
+    _semlock: _SemLock
+
+
+class _UnfinishedCounter(Protocol):
+    """Shape of a JoinableQueue's private unfinished-task counter."""
+
+    _unfinished_tasks: _CounterSemaphore
+
+
 def unfinished_tasks(q: object) -> int:
     """Number of items put on a JoinableQueue but not yet task_done()'d.
 
     ``multiprocessing.queues.JoinableQueue`` keeps the counter in a private
     ``Semaphore`` and does not expose it as an attribute (unlike
-    ``queue.Queue``).
+    ``queue.Queue``). That chain of private members is not modeled in
+    typeshed, so it is typed here with casts; the private-access check is
+    deliberately suppressed for this documented white-box access.
     """
-    unfinished = cast(object, q._unfinished_tasks)
-    semlock = cast(object, unfinished._semlock)
-    get_value = cast(Callable[[], int], semlock._get_value)
-    return get_value()
+    counter = cast(_UnfinishedCounter, q)
+    return counter._unfinished_tasks._semlock._get_value()  # pyright: ignore[reportPrivateUsage]
 
 
 class TestContainerLogReader(unittest.IsolatedAsyncioTestCase):
@@ -509,13 +527,17 @@ class RecordingJoinableQueue(mp_queues.JoinableQueue[Commit | None]):
     """Records the maxsize used to construct the queue.
 
     ``multiprocessing.JoinableQueue`` is a factory function, so the concrete
-    class from ``multiprocessing.queues`` is subclassed instead.
+    class from ``multiprocessing.queues`` is subclassed instead. The maxsize
+    is also copied to a public attribute: the concrete class stores it in a
+    private ``_maxsize`` member.
     """
 
     instances: ClassVar[list[RecordingJoinableQueue]] = []
+    maxsize: int
 
     def __init__(self, maxsize: int = 0) -> None:
         super().__init__(maxsize, ctx=mp.get_context())
+        self.maxsize = maxsize
         RecordingJoinableQueue.instances.append(self)
 
 
@@ -727,7 +749,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             # polling loop must not have fetched a second batch yet.
             self.assertEqual(provider.fetch_count, 1)
             (task_queue,) = RecordingJoinableQueue.instances
-            self.assertEqual(cast(object, task_queue._maxsize), 2)
+            self.assertEqual(task_queue.maxsize, 2)
 
             # Simulate Ctrl-C (the first Ctrl-C cancels main()).
             _ = main_task.cancel()

@@ -17,7 +17,16 @@ package = false
 
 [tool.basedpyright]
 pythonVersion = "3.14"
-exclude = ["src/rcc/tests/engine/known_issues/commits/**"]
+exclude = [
+    "src/rcc/tests/engine/known_issues/commits/**",
+    ".venv/**",
+]
 
 [tool.ruff]
 target-version = "py314"
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.39.10",
+    "ruff>=0.16.3",
+]

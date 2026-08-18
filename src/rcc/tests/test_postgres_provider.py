@@ -299,20 +299,20 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
 
     def test_pool_max_size_derived_from_concurrency(self) -> None:
         provider = Postgres(make_cfg(concurrency=4))
-        self.assertEqual(cast(object, provider._pool_max_size), 6)
+        self.assertEqual(provider.pool_max_size, 6)
 
     def test_pool_max_size_derived_value_clamped_to_min_size(self) -> None:
         provider = Postgres(make_cfg(concurrency=1, pool_min_size=5))
-        self.assertEqual(cast(object, provider._pool_max_size), 5)
+        self.assertEqual(provider.pool_max_size, 5)
 
     def test_pool_max_size_explicit_value_wins(self) -> None:
         provider = Postgres(make_cfg(concurrency=4, pool_max_size=100))
-        self.assertEqual(cast(object, provider._pool_max_size), 100)
+        self.assertEqual(provider.pool_max_size, 100)
 
     def test_pool_max_size_derivation_uses_default_concurrency(self) -> None:
         provider = Postgres(make_cfg())
         self.assertEqual(
-            cast(object, provider._pool_max_size),
+            provider.pool_max_size,
             rcc.config.DEFAULT_CONCURRENCY_PER_WORKER + 2,
         )
 
@@ -380,14 +380,13 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         import pickle
 
         provider = Postgres(make_cfg())
-        provider._pool = object()
-        clone = cast(Postgres, pickle.loads(pickle.dumps(provider)))
-        self.assertIsNone(cast(object, clone._pool))
-        # The configuration itself survives pickling.
-        self.assertEqual(
-            cast(object, clone._pool_min_size),
-            cast(object, provider._pool_min_size),
+        provider._pool = cast(  # pyright: ignore[reportPrivateUsage]
+            psycopg_pool.AsyncConnectionPool[psycopg.AsyncConnection], object()
         )
+        clone = cast(Postgres, pickle.loads(pickle.dumps(provider)))
+        self.assertIsNone(clone._pool)  # pyright: ignore[reportPrivateUsage]
+        # The configuration itself survives pickling.
+        self.assertEqual(clone.pool_min_size, provider.pool_min_size)
 
 
 class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
@@ -395,7 +394,10 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
         self, connection: FakeConnection
     ) -> tuple[Postgres, FakeConnection]:
         provider = Postgres(make_cfg())
-        provider._pool = FakePool(connection)
+        provider._pool = cast(  # pyright: ignore[reportPrivateUsage]
+            psycopg_pool.AsyncConnectionPool[psycopg.AsyncConnection],
+            cast(object, FakePool(connection)),
+        )
         return provider, connection
 
     async def test_update_commit_commits_on_success(self) -> None:
@@ -477,7 +479,10 @@ class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):
 
     async def test_pool_exhaustion_propagates_and_is_not_swallowed(self) -> None:
         provider = Postgres(make_cfg())
-        provider._pool = ExhaustedPool()
+        provider._pool = cast(  # pyright: ignore[reportPrivateUsage]
+            psycopg_pool.AsyncConnectionPool[psycopg.AsyncConnection],
+            cast(object, ExhaustedPool()),
+        )
 
         with self.assertRaises(psycopg_pool.PoolTimeout):
             await provider.update_commit(make_commit())

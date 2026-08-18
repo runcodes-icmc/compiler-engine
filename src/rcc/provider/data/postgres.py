@@ -61,6 +61,16 @@ class Postgres(DataProvider):
         self._pool_timeout = float(str(db.get("pool_timeout", 30.0)))
         self._pool = None
 
+    @property
+    def pool_min_size(self) -> int:
+        """Configured minimum pool size (read-only)."""
+        return self._pool_min_size
+
+    @property
+    def pool_max_size(self) -> int:
+        """Configured maximum pool size (derived from concurrency if unset)."""
+        return self._pool_max_size
+
     @override
     def __getstate__(self) -> dict[str, object]:
         # A pool holds live connections, threads and background tasks and

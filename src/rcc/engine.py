@@ -19,10 +19,25 @@ from typing import TYPE_CHECKING, cast
 import docker
 import requests
 
-from rcc import cmp, config, util
-
+from .cmp import number_cmp, text_cmp, text_cmp2
+from .config import (
+    DEFAULT_CONCURRENCY_PER_WORKER,
+    DEFAULT_CONFIG,
+    DEFAULT_LOGGER,
+    Config,
+    from_dict,
+    get_config,
+)
+from .languages import language_from_extension
 from .model import Commit, TestCase, TestCaseResult
 from .provider import storage
+from .util import (
+    UninterruptibleContext,
+    count_if,
+    deduce_language,
+    is_compilable,
+    standardize_extension,
+)
 
 if TYPE_CHECKING:
     from .provider.data import DataProvider
@@ -46,9 +61,9 @@ CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 PREFETCH_MAX_CONCURRENT_DOWNLOADS = 8
 
 
-def _get_config() -> config.Config:
+def _get_config() -> Config:
     """Return the registered default configuration, raising if none exists."""
-    cfg = config.get_config(config.DEFAULT_CONFIG)
+    cfg = get_config(DEFAULT_CONFIG)
     if cfg is None:
         raise RuntimeError("No default configuration registered")
     return cfg
@@ -58,7 +73,7 @@ def set_extension(commit: Commit) -> None:
     if commit.fname is None:
         raise ValueError("Commit has no filename; cannot deduce its extension")
     _, extension = os.path.splitext(commit.fname)
-    commit.extension = util.standardize_extension(extension[1:])
+    commit.extension = standardize_extension(extension[1:])
 
 
 def _raise_first_error(results: Iterable[BaseException | None]) -> None:
@@ -140,13 +155,13 @@ async def copy_source_files(
     extension = commit.extension
     if extension == "zip":
         with zipfile.ZipFile(destination) as zip_file:
-            extension = util.deduce_language(zip_file)
+            extension = deduce_language(zip_file)
             commit.extension = extension
-            commit.language = util.language_from_extension(extension)
+            commit.language = language_from_extension(extension)
             zip_file.extractall(src_dir)
     elif extension is not None:
-        commit.language = util.language_from_extension(extension)
-    commit.is_compilable = util.is_compilable(extension)
+        commit.language = language_from_extension(extension)
+    commit.is_compilable = is_compilable(extension)
 
     # Copy files uploaded with exercise
     fnames = await data_provider.fetch_exercise_files(commit)
@@ -226,13 +241,13 @@ def diff(
     user_fname: str, test_fname: str, output_type: int, abs_error: float | None
 ) -> int:
     if output_type == TestCase.IO_TYPE_TEXT:
-        if cmp.text_cmp(user_fname, test_fname):
+        if text_cmp(user_fname, test_fname):
             return TestCaseResult.STATUS_CORRECT
-        elif cmp.text_cmp2(user_fname, test_fname):
+        elif text_cmp2(user_fname, test_fname):
             return TestCaseResult.STATUS_MALFORMED
         return TestCaseResult.STATUS_INCORRECT
     elif output_type == TestCase.IO_TYPE_NUMERIC:
-        if cmp.number_cmp(user_fname, test_fname, abs_error or 0.0):
+        if number_cmp(user_fname, test_fname, abs_error or 0.0):
             return TestCaseResult.STATUS_CORRECT
         return TestCaseResult.STATUS_INCORRECT
     elif output_type == TestCase.IO_TYPE_BINARY:
@@ -248,7 +263,7 @@ def process_test_results(
     test_case: TestCase,
     base_dir: str,
 ) -> TestCaseResult:
-    logger = logging.getLogger(config.DEFAULT_LOGGER)
+    logger = logging.getLogger(DEFAULT_LOGGER)
     user_out_fname = os.path.join(base_dir, f"{test_case.id}.output")
     user_err_fname = os.path.join(base_dir, f"{test_case.id}.error")
     run_info_fname = os.path.join(base_dir, f"{test_case.id}.monitor_out")
@@ -359,7 +374,7 @@ class ContainerLogReader:
         except Exception as e:  # noqa: BLE001
             # The generator raised (connection dropped, decode error, ...):
             # treat the stream as ended.
-            logger = logging.getLogger(config.DEFAULT_LOGGER)
+            logger = logging.getLogger(DEFAULT_LOGGER)
             logger.debug("Container log stream terminated: %s", e)
         finally:
             _ = self._push(self.END)
@@ -410,7 +425,7 @@ async def run(
     A fresh docker client is created per commit: each concurrent task gets its
     own client, which also sidesteps docker-py thread-safety questions.
     """
-    logger = logging.getLogger(config.DEFAULT_LOGGER)
+    logger = logging.getLogger(DEFAULT_LOGGER)
     cfg = _get_config()
 
     client = await asyncio.to_thread(docker.from_env)
@@ -591,7 +606,7 @@ def compute_score(
     def is_correct(test_result: TestCaseResult) -> bool:
         return test_result.status == TestCaseResult.STATUS_CORRECT
 
-    commit.corrects = util.count_if(is_correct, test_results)
+    commit.corrects = count_if(is_correct, test_results)
     # Score starts at 10 and is reduced proportionally to the number of
     # incorrect test cases
     commit.score = 10.0
@@ -613,7 +628,7 @@ def cleanup_tests(base_dir: str) -> None:
 
 
 async def process_commit(
-    data_provider: DataProvider, commit: Commit, cfg: config.Config | None = None
+    data_provider: DataProvider, commit: Commit, cfg: Config | None = None
 ) -> None:
     """Process a single commit: compile it, run its test cases, store results.
 
@@ -627,10 +642,10 @@ async def process_commit(
     concurrently behind a semaphore.
     """
     if cfg is None:
-        cfg = config.get_config(config.DEFAULT_CONFIG)
+        cfg = get_config(DEFAULT_CONFIG)
     if cfg is None:
         raise RuntimeError("No default configuration registered")
-    logger = logging.getLogger(config.DEFAULT_LOGGER)
+    logger = logging.getLogger(DEFAULT_LOGGER)
     logger.debug(
         f"[{commit.id}] user_email={commit.user_email}, exercise_id={commit.exercise_id}, commit_time={commit.commit_time}"
     )
@@ -651,7 +666,7 @@ async def process_commit(
     # has in-flight commits, capped at a sane small maximum (and never zero,
     # which would deadlock every download).
     concurrency = int(
-        str(cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER))
+        str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
     )
     download_semaphore = asyncio.Semaphore(
         max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
@@ -813,7 +828,7 @@ async def process_commit(
 async def process_commits(
     data_provider: DataProvider,
     commit_queue: mp_queues.JoinableQueue[Commit | None],
-    cfg: config.Config | None = None,
+    cfg: Config | None = None,
 ) -> None:
     """Worker main loop: pull commits from the queue and process them.
 
@@ -840,7 +855,7 @@ async def process_commits(
     worker stops.
     """
     # Set up logging for worker process
-    logger = logging.getLogger(config.DEFAULT_LOGGER)
+    logger = logging.getLogger(DEFAULT_LOGGER)
 
     # Only add handlers if logger doesn't have any (worker processes don't inherit parent's handlers)
     if not logger.handlers:
@@ -856,20 +871,18 @@ async def process_commits(
 
     # Register configuration if provided
     if cfg is not None:
-        _ = config.from_dict(config.DEFAULT_CONFIG, cfg.get_dict())
+        _ = from_dict(DEFAULT_CONFIG, cfg.get_dict())
     else:
-        cfg = config.get_config(config.DEFAULT_CONFIG)
+        cfg = get_config(DEFAULT_CONFIG)
 
     if cfg is None:
         # No configuration was passed and none is registered: fall back to
         # the default concurrency (process_commit() would fail on the missing
         # configuration anyway).
-        concurrency = config.DEFAULT_CONCURRENCY_PER_WORKER
+        concurrency = DEFAULT_CONCURRENCY_PER_WORKER
     else:
         concurrency = int(
-            str(
-                cfg.get("concurrency_per_worker", config.DEFAULT_CONCURRENCY_PER_WORKER)
-            )
+            str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
         )
 
     # exceptions that stop the worker
@@ -938,7 +951,7 @@ async def process_commits(
             semaphore.release()
 
     try:
-        with util.UninterruptibleContext():
+        with UninterruptibleContext():
             while True:
                 if fatal.is_set():
                     break
@@ -991,7 +1004,7 @@ async def process_commits(
 def run_worker(
     data_provider: DataProvider,
     commit_queue: mp_queues.JoinableQueue[Commit | None],
-    cfg: config.Config | None = None,
+    cfg: Config | None = None,
 ) -> None:
     """Sync entry point for the worker ``multiprocessing.Process`` target.
 
