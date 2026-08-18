@@ -1,5 +1,3 @@
-from __future__ import unicode_literals
-
 import base64
 import datetime
 from typing import cast, override
@@ -318,7 +316,7 @@ class Postgres(DataProvider):
                 query,
                 (
                     Commit.STATUS_PROCESSING,
-                    datetime.datetime.now(),
+                    datetime.datetime.now(tz=datetime.UTC),
                     commit.id,
                     Commit.STATUS_IN_QUEUE,
                 ),

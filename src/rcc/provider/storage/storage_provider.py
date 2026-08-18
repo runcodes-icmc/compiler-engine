@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from ...model import Commit, TestCase
 
 
-class StorageProvider(object):
+class StorageProvider:
     def fetch_commit_file(self, _commit: Commit, _destination: str) -> None:
         raise NotImplementedError()
 

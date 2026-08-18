@@ -121,7 +121,7 @@ def build_commit(metadata: CommitMetadata) -> Commit:
         0,
         False,
         "",
-        datetime.datetime.now(),
+        datetime.datetime.now(tz=datetime.UTC),
         None,
         None,
         None,
@@ -206,7 +206,6 @@ class MockStorageProvider(rcc.provider.storage.StorageProvider):
 
     def __init__(self, cfg: rcc.config.Config) -> None:
         self.dirname = os.path.dirname(os.path.realpath(__file__))
-        pass
 
     @override
     def fetch_commit_file(self, commit: Commit, destination: str) -> None:
@@ -267,7 +266,7 @@ class TestEngineKnownIssues(unittest.TestCase):
     def setUp(self) -> None:
         self.data_prov = MockDataProvider()
         self.storage_provider_class = rcc.provider.storage.S3
-        setattr(rcc.provider.storage, "S3", MockStorageProvider)
+        rcc.provider.storage.S3 = MockStorageProvider
         self.handler = logging.StreamHandler(sys.stdout)
         self.handler.setLevel(logging.DEBUG)
         self.handler.setFormatter(
@@ -279,7 +278,7 @@ class TestEngineKnownIssues(unittest.TestCase):
 
     @override
     def tearDown(self) -> None:
-        setattr(rcc.provider.storage, "S3", self.storage_provider_class)
+        rcc.provider.storage.S3 = self.storage_provider_class
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 

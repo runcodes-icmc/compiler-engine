@@ -20,7 +20,7 @@ import threading
 import time
 import unittest
 from collections.abc import Callable, Iterable
-from typing import ClassVar, cast, override
+from typing import ClassVar, Self, cast, override
 from unittest import mock
 
 import rcc
@@ -36,7 +36,7 @@ from rcc.provider.data import DataProvider
 def make_commit(commit_id: int) -> Commit:
     return Commit(
         commit_id,
-        "user{}@example.com".format(commit_id),
+        f"user{commit_id}@example.com",
         1,
         1,
         Commit.STATUS_IN_QUEUE,
@@ -45,13 +45,13 @@ def make_commit(commit_id: int) -> Commit:
         0.0,
         False,
         "",
-        datetime.datetime(2026, 1, 1),
+        datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
         None,
         None,
         None,
         "",
         "1.2.3.4",
-        "commits/{}/main.c".format(commit_id),
+        f"commits/{commit_id}/main.c",
         1,
         1,
         1,
@@ -81,7 +81,7 @@ def make_cfg(concurrency: int, exec_dir: str | None = None) -> rcc.config.Config
     )
 
 
-class FakeStorage(object):
+class FakeStorage:
     """Synchronous no-op storage provider (its methods run in worker threads)."""
 
     def __init__(self, cfg: rcc.config.Config) -> None:
@@ -190,9 +190,9 @@ def unfinished_tasks(q: object) -> int:
     ``Semaphore`` and does not expose it as an attribute (unlike
     ``queue.Queue``).
     """
-    unfinished = cast(object, getattr(q, "_unfinished_tasks"))
-    semlock = cast(object, getattr(unfinished, "_semlock"))
-    get_value = cast(Callable[[], int], getattr(semlock, "_get_value"))
+    unfinished = cast(object, q._unfinished_tasks)
+    semlock = cast(object, unfinished._semlock)
+    get_value = cast(Callable[[], int], semlock._get_value)
     return get_value()
 
 
@@ -542,7 +542,7 @@ class RecordingPutQueue(mp_queues.JoinableQueue[Commit | None]):
         super().put(obj, block, timeout)
 
 
-class FakeProcess(object):
+class FakeProcess:
     """Runs the mp.Process target in a daemon thread (no real fork/spawn)."""
 
     _thread: threading.Thread
@@ -565,11 +565,11 @@ class FakeProcess(object):
         pass
 
 
-class _NullSingletonContext(object):
+class _NullSingletonContext:
     def __init__(self, lock_fname: str, remove_lock_at_exit: bool = True) -> None:
         pass
 
-    def __enter__(self) -> _NullSingletonContext:
+    def __enter__(self) -> Self:
         return self
 
     def __exit__(
@@ -727,7 +727,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             # polling loop must not have fetched a second batch yet.
             self.assertEqual(provider.fetch_count, 1)
             (task_queue,) = RecordingJoinableQueue.instances
-            self.assertEqual(cast(object, getattr(task_queue, "_maxsize")), 2)
+            self.assertEqual(cast(object, task_queue._maxsize), 2)
 
             # Simulate Ctrl-C (the first Ctrl-C cancels main()).
             _ = main_task.cancel()

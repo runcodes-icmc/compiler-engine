@@ -59,18 +59,18 @@ class S3(StorageProvider):
 
     @override
     def fetch_test_case_input_file(self, test_case: TestCase, destination: str) -> None:
-        self.cases_bucket.download_file("{}/in".format(test_case.id), destination)
+        self.cases_bucket.download_file(f"{test_case.id}/in", destination)
 
     @override
     def fetch_test_case_output_file(
         self, test_case: TestCase, destination: str
     ) -> None:
-        self.cases_bucket.download_file("{}/out".format(test_case.id), destination)
+        self.cases_bucket.download_file(f"{test_case.id}/out", destination)
 
     @override
     def fetch_test_case_files(self, test_case: TestCase, destination: str) -> None:
         for fname in test_case.files:
-            key = "{}/files/{}".format(test_case.id, fname)
+            key = f"{test_case.id}/files/{fname}"
             dest_fname = os.path.join(destination, fname)
             self.cases_bucket.download_file(key, dest_fname)
 

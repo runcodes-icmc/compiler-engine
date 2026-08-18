@@ -111,7 +111,7 @@ def build_commit(
         0,
         False,
         "",
-        datetime.datetime.now(),
+        datetime.datetime.now(tz=datetime.UTC),
         None,
         None,
         None,
@@ -202,7 +202,7 @@ class TestEngineZip(unittest.TestCase):
     def setUp(self) -> None:
         self.data_prov = hello.MockDataProvider()
         self.storage_provider_class = rcc.provider.storage.S3
-        setattr(rcc.provider.storage, "S3", MockStorageProvider)
+        rcc.provider.storage.S3 = MockStorageProvider
         # Ensure configuration is registered for tests
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         if cfg is None:
@@ -217,7 +217,7 @@ class TestEngineZip(unittest.TestCase):
 
     @override
     def tearDown(self) -> None:
-        setattr(rcc.provider.storage, "S3", self.storage_provider_class)
+        rcc.provider.storage.S3 = self.storage_provider_class
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 

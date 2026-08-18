@@ -2,7 +2,7 @@
 n = int(input("n: "))
 n = 2**n - 1
 
-print("\nNúmeros primos a partir de %d:" % n)
+print(f"\nNúmeros primos a partir de {n}:")
 cont = 0
 while cont < 5:
     EhPrimo = True

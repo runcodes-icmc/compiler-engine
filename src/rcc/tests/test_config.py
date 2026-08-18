@@ -94,19 +94,23 @@ class TestEnvConfigParallelismDefaults(unittest.TestCase):
         self.assertEqual(int(str(db["pool_max_size"])), 20)
 
     def test_non_integer_env_worker_count_raises_clear_error(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"RUNCODES_COMPILER_NUM_WORKERS": "many"}, clear=True
+        with (
+            mock.patch.dict(
+                os.environ, {"RUNCODES_COMPILER_NUM_WORKERS": "many"}, clear=True
+            ),
+            self.assertRaises(ConfigError) as raised,
         ):
-            with self.assertRaises(ConfigError) as raised:
-                _ = EnvConfig()
+            _ = EnvConfig()
         self.assertIn("RUNCODES_COMPILER_NUM_WORKERS", str(raised.exception))
 
     def test_non_integer_env_concurrency_raises_clear_error(self) -> None:
-        with mock.patch.dict(
-            os.environ, {"RUNCODES_COMPILER_CONCURRENCY": "4.5"}, clear=True
+        with (
+            mock.patch.dict(
+                os.environ, {"RUNCODES_COMPILER_CONCURRENCY": "4.5"}, clear=True
+            ),
+            self.assertRaises(ConfigError) as raised,
         ):
-            with self.assertRaises(ConfigError) as raised:
-                _ = EnvConfig()
+            _ = EnvConfig()
         self.assertIn("RUNCODES_COMPILER_CONCURRENCY", str(raised.exception))
 
 

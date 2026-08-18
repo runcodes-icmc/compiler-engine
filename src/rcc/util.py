@@ -2,8 +2,6 @@
 Collection of utilities.
 """
 
-from __future__ import unicode_literals
-
 import datetime
 import fcntl
 import os
@@ -12,11 +10,9 @@ import time
 import zipfile
 from collections.abc import Callable, Iterable
 from types import FrameType, TracebackType
-from typing import TextIO, TypeVar
+from typing import Self, TextIO
 
-from .languages import language_from_extension as language_from_extension
-
-T = TypeVar("T")
+from .languages import language_from_extension
 
 
 class SingletonContext:
@@ -34,7 +30,7 @@ class SingletonContext:
         self.remove_at_exit = remove_lock_at_exit
         self.lock_file = None
 
-    def __enter__(self) -> "SingletonContext":
+    def __enter__(self) -> Self:
         lock_file = open(self.lock_fname, "w")
         try:
             fcntl.lockf(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -42,7 +38,7 @@ class SingletonContext:
         except OSError:
             lock_file.close()
             raise RuntimeError(
-                "Cannot enter singleton context (lock file: {})".format(self.lock_fname)
+                f"Cannot enter singleton context (lock file: {self.lock_fname})"
             )
         self.lock_file = lock_file
         return self
@@ -69,7 +65,7 @@ class UninterruptibleContext:
     def __init__(self) -> None:
         self.sigint_handler = signal.SIG_DFL
 
-    def __enter__(self) -> "UninterruptibleContext":
+    def __enter__(self) -> Self:
         self.sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
         return self
 
@@ -131,7 +127,7 @@ class Sleeper:
         return t
 
 
-def count_if(pred: Callable[[T], object], iterable: Iterable[T]) -> int:
+def count_if[T](pred: Callable[[T], object], iterable: Iterable[T]) -> int:
     """Returns the number of elements of `iterable` for which `pred` holds."""
     return sum(1 for x in iterable if pred(x))
 
@@ -185,5 +181,5 @@ def is_compilable(ext: str | None) -> bool:
 
 
 def from_datetime_to_timestamp(dt: datetime.datetime) -> int:
-    epoch = datetime.datetime.fromtimestamp(0, tz=datetime.timezone.utc)
+    epoch = datetime.datetime.fromtimestamp(0, tz=datetime.UTC)
     return int((dt - epoch).total_seconds())

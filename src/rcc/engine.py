@@ -1,4 +1,4 @@
-from __future__ import annotations, division, print_function, unicode_literals
+from __future__ import annotations
 
 import asyncio
 import configparser
@@ -19,9 +19,7 @@ from typing import TYPE_CHECKING, cast
 import docker
 import requests
 
-import rcc.cmp as cmp
-import rcc.config as config
-import rcc.util as util
+from rcc import cmp, config, util
 
 from .model import Commit, TestCase, TestCaseResult
 from .provider import storage
@@ -94,7 +92,7 @@ async def _await_task(task: asyncio.Task[None]) -> Exception | None:
     """
     try:
         await task
-    except Exception as error:
+    except Exception as error:  # noqa: BLE001
         return error
     return None
 
@@ -183,14 +181,14 @@ async def copy_test_case_files(
 
     async def copy_one(test_case: TestCase) -> None:
         # Copy test case input file (boto3 call in a worker thread)
-        dest = os.path.join(base_dir, "{}.in".format(test_case.id))
+        dest = os.path.join(base_dir, f"{test_case.id}.in")
         async with semaphore:
             await asyncio.to_thread(
                 storage_provider.fetch_test_case_input_file, test_case, dest
             )
 
         # Copy additional files uploaded to this test case
-        test_case_dir = os.path.join(base_dir, "test_{}".format(test_case.id))
+        test_case_dir = os.path.join(base_dir, f"test_{test_case.id}")
         os.makedirs(test_case_dir, DEFAULT_MKDIR_PERMISSIONS)
         async with semaphore:
             await asyncio.to_thread(
@@ -214,14 +212,14 @@ def create_container_cfg_file(
         ("src_file", commit.fname, True),
     ]
     container_cfg.extend(
-        [("t_{}".format(test.id), test.cpu_time, False) for test in test_cases]
+        [(f"t_{test.id}", test.cpu_time, False) for test in test_cases]
     )
     with open(os.path.join(base_dir, str(cfg.container_cfg_file)), "w") as cfg_file:
         for cfg_item in container_cfg:
             if cfg_item[2]:  # value needs shell quoting
-                print("{c[0]}='{c[1]}'".format(c=cfg_item), file=cfg_file)
+                print(f"{cfg_item[0]}='{cfg_item[1]}'", file=cfg_file)
             else:
-                print("{c[0]}={c[1]}".format(c=cfg_item), file=cfg_file)
+                print(f"{cfg_item[0]}={cfg_item[1]}", file=cfg_file)
 
 
 def diff(
@@ -241,7 +239,7 @@ def diff(
         if filecmp.cmp(user_fname, test_fname, shallow=False):
             return TestCaseResult.STATUS_CORRECT
         return TestCaseResult.STATUS_INCORRECT
-    raise ValueError("Unknown test case output type: {}".format(output_type))
+    raise ValueError(f"Unknown test case output type: {output_type}")
 
 
 def process_test_results(
@@ -251,9 +249,9 @@ def process_test_results(
     base_dir: str,
 ) -> TestCaseResult:
     logger = logging.getLogger(config.DEFAULT_LOGGER)
-    user_out_fname = os.path.join(base_dir, "{}.output".format(test_case.id))
-    user_err_fname = os.path.join(base_dir, "{}.error".format(test_case.id))
-    run_info_fname = os.path.join(base_dir, "{}.monitor_out".format(test_case.id))
+    user_out_fname = os.path.join(base_dir, f"{test_case.id}.output")
+    user_err_fname = os.path.join(base_dir, f"{test_case.id}.error")
+    run_info_fname = os.path.join(base_dir, f"{test_case.id}.monitor_out")
     run_info = configparser.ConfigParser(allow_no_value=True)
     with open(run_info_fname) as run_info_file:
         run_info.read_file(it.chain(("[info]",), run_info_file))
@@ -261,17 +259,13 @@ def process_test_results(
     if len(run_info["info"]["signal"]) != 0 or user_err_stat.st_size != 0:
         test_status = TestCaseResult.STATUS_INCORRECT
     else:
-        test_out_fname = os.path.join(base_dir, "{}.out".format(test_case.id))
+        test_out_fname = os.path.join(base_dir, f"{test_case.id}.out")
         storage_provider.fetch_test_case_output_file(test_case, test_out_fname)
         if (
             test_case.output_type == TestCase.IO_TYPE_NUMERIC
             and test_case.abs_error is None
         ):
-            logger.debug(
-                "[{c.id}] ({t.id}) Error margin is not set".format(
-                    c=commit, t=test_case
-                )
-            )
+            logger.debug(f"[{commit.id}] ({test_case.id}) Error margin is not set")
             test_case.abs_error = 0.0
         test_status = diff(
             user_out_fname, test_out_fname, test_case.output_type, test_case.abs_error
@@ -362,7 +356,7 @@ class ContainerLogReader:
                 line = raw.decode("utf8") if isinstance(raw, bytes) else raw
                 if not self._push(line.strip()):
                     break
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001
             # The generator raised (connection dropped, decode error, ...):
             # treat the stream as ended.
             logger = logging.getLogger(config.DEFAULT_LOGGER)
@@ -383,11 +377,19 @@ async def expect_message(
     """
     message = await asyncio.wait_for(log_reader.get(), timeout)
     if message is ContainerLogReader.END:
-        raise RuntimeError(
-            "Container log stream ended before receiving `{}`".format(expected)
-        )
+        raise RuntimeError(f"Container log stream ended before receiving `{expected}`")
     if message != expected:
-        raise RuntimeError("Expected `{}`, got `{}`".format(expected, message))
+        raise RuntimeError(f"Expected `{expected}`, got `{message}`")
+
+
+def _read_compilation_error_file(fname: str) -> str:
+    """Read the compiler's error output file, tolerating undecodable bytes.
+
+    'replace' is used because the compiler output may include text from the
+    user-submitted file, which we have no control of.
+    """
+    with open(fname, errors="replace") as err_file:
+        return "".join(err_file.readlines()).strip()
 
 
 async def run(
@@ -454,10 +456,9 @@ async def run(
                 )
 
                 err_fname = os.path.join(base_dir, str(cfg.compilation_error_file))
-                # 'replace' is used because the compiler output may include text from
-                # the user-submitted file, which we have no control of
-                with open(err_fname, errors="replace") as err_file:
-                    compiled_error = "".join(err_file.readlines()).strip()
+                compiled_error = await asyncio.to_thread(
+                    _read_compilation_error_file, err_fname
+                )
                 if compiled_error != "":
                     commit.status = Commit.STATUS_ERROR
                     commit.compiled_error = compiled_error
@@ -466,14 +467,14 @@ async def run(
                 else:
                     commit.status = Commit.STATUS_COMPILED
                     commit.is_compiled = True
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Compilation timed out", exc_info=True)
                 raise RuntimeError("Compilation timed out")
         else:
             # NOTE: does not make much sense, but seems to be needed
             commit.is_compiled = True
 
-        commit.compilation_finished_time = datetime.datetime.now()
+        commit.compilation_finished_time = datetime.datetime.now(tz=datetime.UTC)
         await data_provider.update_commit(commit)
 
         if commit.status != Commit.STATUS_ERROR:
@@ -490,7 +491,7 @@ async def run(
 
                 # Test cases execution done
                 await expect_message(log_reader, "run.done", timeout)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 logger.warning("Execution timed out", exc_info=True)
                 raise RuntimeError("Execution timed out")
         try:
@@ -498,14 +499,14 @@ async def run(
                 container.wait, timeout=cast(float, cfg.base_exec_timeout)
             )
         except requests.exceptions.ReadTimeout:
-            logger.error("Container wait timed out", exc_info=True)
+            logger.exception("Container wait timed out")
             await asyncio.to_thread(container.kill)
         finally:
             # Ensure container is removed
             try:
                 await asyncio.to_thread(container.remove, force=True)
             except Exception:
-                logger.error("Container removal failed", exc_info=True)
+                logger.exception("Container removal failed")
     finally:
         log_reader.stop()
 
@@ -566,7 +567,7 @@ def prepare_output_file(commit: Commit, base_dir: str) -> str:
                 _ = f.truncate(cast(int, cfg.max_output_file_size))
 
     output_dir = os.path.join(base_dir, str(cfg.output_files_dir))
-    output_fname = os.path.join(base_dir, "{}.zip".format(commit.id))
+    output_fname = os.path.join(base_dir, f"{commit.id}.zip")
     with zipfile.ZipFile(output_fname, "w") as output_file:
         for dir_path, _, fnames in os.walk(output_dir):
             for fname in fnames:
@@ -631,23 +632,19 @@ async def process_commit(
         raise RuntimeError("No default configuration registered")
     logger = logging.getLogger(config.DEFAULT_LOGGER)
     logger.debug(
-        "[{c.id}] user_email={c.user_email}, exercise_id={c.exercise_id}, commit_time={c.commit_time}".format(
-            c=commit
-        )
+        f"[{commit.id}] user_email={commit.user_email}, exercise_id={commit.exercise_id}, commit_time={commit.commit_time}"
     )
 
     try:
         storage_provider = storage.from_config(cfg)
     except Exception:
-        logger.error("[{c.id}] Storage provider error".format(c=commit), exc_info=True)
+        logger.exception(f"[{commit.id}] Storage provider error")
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         return
 
-    base_dir = os.path.join(cast(str, cfg.exec_dir), "commit_{}".format(commit.id))
-    remote_dir = os.path.join(
-        cast(str, cfg.exec_dir_remote), "commit_{}".format(commit.id)
-    )
+    base_dir = os.path.join(cast(str, cfg.exec_dir), f"commit_{commit.id}")
+    remote_dir = os.path.join(cast(str, cfg.exec_dir_remote), f"commit_{commit.id}")
 
     # Bound for the prefetch S3 downloads: mirror the per-worker commit
     # concurrency so a worker never opens more simultaneous downloads than it
@@ -668,7 +665,7 @@ async def process_commit(
         cleanup_tests(base_dir)
         os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
     except Exception:
-        logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
+        logger.exception(f"[{commit.id}] Failed to prepare runs")
         commit.reset()
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
@@ -722,11 +719,11 @@ async def process_commit(
             for step_error in (delete_error, download_error):
                 if isinstance(step_error, Exception):
                     logger.error(
-                        "[{c.id}] Concurrent prefetch step failed".format(c=commit),
+                        f"[{commit.id}] Concurrent prefetch step failed",
                         exc_info=step_error,
                     )
             logger.error(
-                "[{c.id}] Failed to fetch test cases".format(c=commit),
+                f"[{commit.id}] Failed to fetch test cases",
                 exc_info=test_cases,
             )
             commit.status = Commit.STATUS_INTERNAL_ERROR
@@ -749,10 +746,10 @@ async def process_commit(
 
     commit.reset()
     commit.status = Commit.STATUS_PROCESSING
-    commit.compilation_started_time = datetime.datetime.now()
+    commit.compilation_started_time = datetime.datetime.now(tz=datetime.UTC)
     await data_provider.update_commit(commit)
 
-    logger.debug("[{c.id}] Preparing to run tests".format(c=commit))
+    logger.debug(f"[{commit.id}] Preparing to run tests")
     try:
         # The commit file was downloaded during the prefetch phase; surface a
         # failure here so it goes through the original "prepare runs" error
@@ -768,28 +765,28 @@ async def process_commit(
             storage_provider, test_cases, base_dir, download_semaphore
         )
     except Exception:
-        logger.error("[{c.id}] Failed to prepare runs".format(c=commit), exc_info=True)
+        logger.exception(f"[{commit.id}] Failed to prepare runs")
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
 
-    logger.debug("[{c.id}] Running tests".format(c=commit))
+    logger.debug(f"[{commit.id}] Running tests")
     try:
         test_results = await run_tests(
             data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
         )
     except Exception:
-        logger.error("[{c.id}] Failed to run tests".format(c=commit), exc_info=True)
+        logger.exception(f"[{commit.id}] Failed to run tests")
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
-    logger.debug("[{c.id}] Done testing".format(c=commit))
+    logger.debug(f"[{commit.id}] Done testing")
 
-    logger.debug("[{c.id}] Storing results".format(c=commit))
+    logger.debug(f"[{commit.id}] Storing results")
     try:
         compute_score(commit, test_cases, test_results)
         await data_provider.update_commit(commit)
@@ -802,18 +799,15 @@ async def process_commit(
             )
         cleanup_tests(base_dir)
     except Exception:
-        logger.error(
-            "[{c.id}] Could not save results, commit data might be inconsistent".format(
-                c=commit
-            ),
-            exc_info=True,
+        logger.exception(
+            f"[{commit.id}] Could not save results, commit data might be inconsistent"
         )
         commit.status = Commit.STATUS_INTERNAL_ERROR
         await data_provider.update_commit(commit)
         if bool(cfg.cleanup_on_error):
             cleanup_tests(base_dir)
         return
-    logger.debug("[{c.id}] Commit processing done".format(c=commit))
+    logger.debug(f"[{commit.id}] Commit processing done")
 
 
 async def process_commits(
@@ -892,7 +886,7 @@ async def process_commits(
         # across processes, so every worker opens its own).
         await data_provider.open()
     except Exception:
-        logger.error("Failed to open database connection pool", exc_info=True)
+        logger.exception("Failed to open database connection pool")
         raise
 
     # Caps the number of commits processed concurrently by this worker.

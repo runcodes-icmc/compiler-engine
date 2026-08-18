@@ -31,7 +31,7 @@ from rcc.provider.storage import StorageProvider
 def make_commit(commit_id: int = 1) -> Commit:
     return Commit(
         commit_id,
-        "user{}@example.com".format(commit_id),
+        f"user{commit_id}@example.com",
         1,
         1,
         Commit.STATUS_IN_QUEUE,
@@ -40,13 +40,13 @@ def make_commit(commit_id: int = 1) -> Commit:
         0.0,
         False,
         "",
-        datetime.datetime(2026, 1, 1),
+        datetime.datetime(2026, 1, 1, tzinfo=datetime.UTC),
         None,
         None,
         None,
         "",
         "1.2.3.4",
-        "commits/{}/main.c".format(commit_id),
+        f"commits/{commit_id}/main.c",
         1,
         1,
         1,
@@ -77,7 +77,7 @@ def make_cfg(exec_dir: str, **overrides: object) -> rcc.config.Config:
     return cfg
 
 
-class NoopStorage(object):
+class NoopStorage:
     """Synchronous storage provider whose downloads do nothing."""
 
     def __init__(self, cfg: rcc.config.Config | None) -> None:
@@ -350,7 +350,7 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
     async def test_exercise_downloads_run_concurrently_and_bounded(self) -> None:
         """Exercise files download in parallel, capped at the semaphore bound."""
         storage = CountingStorage(None, sleep=0.05)
-        provider = ExerciseFilesProvider(["f{}.c".format(i) for i in range(6)])
+        provider = ExerciseFilesProvider([f"f{i}.c" for i in range(6)])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = make_cfg(tmpdir, concurrency_per_worker=2)
@@ -382,7 +382,7 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = make_cfg(tmpdir)  # cleanup_on_error=True
             commit = make_commit()
-            base_dir = os.path.join(tmpdir, "commit_{}".format(commit.id))
+            base_dir = os.path.join(tmpdir, f"commit_{commit.id}")
             with (
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
@@ -410,7 +410,7 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = make_cfg(tmpdir)
             commit = make_commit()
-            base_dir = os.path.join(tmpdir, "commit_{}".format(commit.id))
+            base_dir = os.path.join(tmpdir, f"commit_{commit.id}")
             with (
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
@@ -441,9 +441,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
                 mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                self.assertRaisesRegex(RuntimeError, "delete failed"),
             ):
-                with self.assertRaisesRegex(RuntimeError, "delete failed"):
-                    await rcc.engine.process_commit(provider, commit, cfg)
+                await rcc.engine.process_commit(provider, commit, cfg)
 
         # The commit was never reset nor marked PROCESSING: it stays in the
         # queue to be retried, exactly like the sequential version.

@@ -48,10 +48,10 @@ def _env_int(name: str, default: int) -> int:
     try:
         return int(raw)
     except ValueError:
-        raise ConfigError("{} must be an integer, got {!r}".format(name, raw)) from None
+        raise ConfigError(f"{name} must be an integer, got {raw!r}") from None
 
 
-__config__: dict[str, Config] = dict()
+__config__: dict[str, Config] = {}
 
 
 class Config:
@@ -121,9 +121,9 @@ def parallelism_values(cfg: Config) -> tuple[int, int]:
     def _parse_int(value: object, key: str, env_var: str) -> int:
         try:
             return int(str(value))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             raise ConfigError(
-                "{} ({}) must be an integer, got {!r}".format(key, env_var, value)
+                f"{key} ({env_var}) must be an integer, got {value!r}"
             ) from None
 
     return (
@@ -167,23 +167,17 @@ def validate(cfg: Config) -> None:
     num_workers, concurrency = parallelism_values(cfg)
     if num_workers < 1:
         raise ConfigError(
-            "num_workers (RUNCODES_COMPILER_NUM_WORKERS) must be >= 1, got {}".format(
-                num_workers
-            )
+            f"num_workers (RUNCODES_COMPILER_NUM_WORKERS) must be >= 1, got {num_workers}"
         )
     if concurrency < 1:
         raise ConfigError(
-            "concurrency_per_worker (RUNCODES_COMPILER_CONCURRENCY) must be >= 1, got {}".format(
-                concurrency
-            )
+            f"concurrency_per_worker (RUNCODES_COMPILER_CONCURRENCY) must be >= 1, got {concurrency}"
         )
     total = total_slots(cfg)
     qsize = queue_maxsize(cfg)
     if qsize < total:
         raise ConfigError(
-            "task queue size ({}) must be >= total in-flight slots ({})".format(
-                qsize, total
-            )
+            f"task queue size ({qsize}) must be >= total in-flight slots ({total})"
         )
 
 

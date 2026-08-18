@@ -103,7 +103,7 @@ def build_commit(
         0,
         False,
         "",
-        datetime.datetime.now(),
+        datetime.datetime.now(tz=datetime.UTC),
         None,
         None,
         None,
@@ -254,7 +254,7 @@ class TestEngineHello(unittest.TestCase):
     def setUp(self) -> None:
         self.data_prov = MockDataProvider()
         self.storage_from_config = rcc.provider.storage.from_config
-        setattr(rcc.provider.storage, "from_config", MockStorageProvider)
+        rcc.provider.storage.from_config = MockStorageProvider
         cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
         if cfg is None:
             # Register a default configuration for tests
@@ -271,7 +271,7 @@ class TestEngineHello(unittest.TestCase):
 
     @override
     def tearDown(self) -> None:
-        setattr(rcc.provider.storage, "from_config", self.storage_from_config)
+        rcc.provider.storage.from_config = self.storage_from_config
         logger = logging.getLogger(rcc.config.DEFAULT_LOGGER)
         logger.removeHandler(self.handler)
 

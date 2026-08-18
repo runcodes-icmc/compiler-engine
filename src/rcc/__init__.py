@@ -1,4 +1,4 @@
-from __future__ import annotations, unicode_literals
+from __future__ import annotations
 
 import argparse
 import asyncio
@@ -130,7 +130,7 @@ async def main() -> None:
         # The configuration could not even be built (e.g. an unparseable
         # parallelism env var). The configured logger is not available yet,
         # so report on stderr and refuse to start.
-        print("Invalid configuration: {}".format(e), file=sys.stderr)
+        print(f"Invalid configuration: {e}", file=sys.stderr)
         sys.exit(1)
 
     log_config = cast(dict[str, object], cfg.log) if isinstance(cfg.log, dict) else None
@@ -141,19 +141,17 @@ async def main() -> None:
     try:
         config.validate(cfg)
     except config.ConfigError as e:
-        logger.error("Invalid configuration: {}".format(e))
+        logger.error(f"Invalid configuration: {e}")
         sys.exit(1)
 
     num_workers, concurrency = config.parallelism_values(cfg)
     logger.info(
-        "Parallelism: workers={}, concurrency={}, max_in_flight={}".format(
-            num_workers, concurrency, config.total_slots(cfg)
-        )
+        f"Parallelism: workers={num_workers}, concurrency={concurrency}, max_in_flight={config.total_slots(cfg)}"
     )
 
     with util.SingletonContext(cast(str, cfg.lock_file)):
         logger.info("Started")
-        logger.debug("Configuration: {}".format(cfg))
+        logger.debug(f"Configuration: {cfg}")
 
         data_provider = data.from_config(cfg)
 
@@ -209,7 +207,7 @@ async def main() -> None:
                         commits, recently_enqueued, commit_suppression
                     )
                 except Exception:
-                    logger.error("Could not fetch commits", exc_info=True)
+                    logger.exception("Could not fetch commits")
                     commits = []
                 if len(commits) > 0:
                     for commit in commits:

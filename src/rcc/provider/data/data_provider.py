@@ -6,7 +6,7 @@ if TYPE_CHECKING:
     from ...model import Commit, TestCase, TestCaseResult
 
 
-class DataProvider(object):
+class DataProvider:
     """Abstract interface for data providers.
 
     Implementations access the database asynchronously and hold a per-process

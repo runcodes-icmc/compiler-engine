@@ -28,7 +28,7 @@ while True:
             coeficiente = 0.6
 
     taxa = (copos * 4.8) / (peso * coeficiente)
-    print("\nTaxa de alcoolemia: %.1f g/l" % (taxa))
+    print(f"\nTaxa de alcoolemia: {taxa:.1f} g/l")
 
     if taxa > 0.2:
         print("Você bebeu demais!\n")
