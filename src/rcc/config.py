@@ -2,8 +2,6 @@
 Module for handling configuration.
 """
 
-from __future__ import annotations
-
 import json
 import os
 from typing import cast, override

@@ -7,8 +7,6 @@ pool lifecycle, transaction semantics (commit/rollback), pool exhaustion and
 row mapping without external services.
 """
 
-from __future__ import annotations
-
 import base64
 import datetime
 import inspect

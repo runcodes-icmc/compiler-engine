@@ -7,8 +7,6 @@ Covers:
 - the bounded task queue backpressure in ``rcc.main()``.
 """
 
-from __future__ import annotations
-
 import argparse
 import asyncio
 import datetime

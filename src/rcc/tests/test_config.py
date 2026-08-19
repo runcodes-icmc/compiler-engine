@@ -6,8 +6,6 @@ scrubbed environment), the parallelism helpers (``parallelism_values``,
 ``total_slots``, ``queue_maxsize``) and ``validate`` directly.
 """
 
-from __future__ import annotations
-
 import os
 import unittest
 from typing import cast, override
