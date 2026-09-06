@@ -110,48 +110,25 @@ class Commit:
 
     @override
     def __str__(self) -> str:
-        s = (
-            "Commit("
-            "id={}, "
-            "user_email={}, "
-            "exercise_id={}, "
-            "real_exercise_id={}, "
-            "status={}, "
-            "commit_hash={}, "
-            "corrects={}, "
-            "score={}, "
-            "is_compiled={}, "
-            "compiled_message={}, "
-            "commit_time={}, "
-            "compilation_started_time={}, "
-            "compilation_finished_time={}, "
-            "compiled_signal={}, "
-            "compiled_error={}, "
-            "user_ip={}, "
-            "aws_key={}, "
-            "offering_id={}, "
-            "real_offering_id={}, "
-            "course_id={})"
-        )
-        return s.format(
-            self.id,
-            self.user_email,
-            self.exercise_id,
-            self.real_exercise_id,
-            self.status,
-            self.commit_hash,
-            self.corrects,
-            self.score,
-            self.is_compiled,
-            self.compiled_message,
-            self.commit_time,
-            self.compilation_started_time,
-            self.compilation_finished_time,
-            self.compiled_signal,
-            self.compiled_error,
-            self.user_ip,
-            self.aws_key,
-            self.offering_id,
-            self.real_offering_id,
-            self.course_id,
+        return (
+            f"Commit(id={self.id}, "
+            f"user_email={self.user_email}, "
+            f"exercise_id={self.exercise_id}, "
+            f"real_exercise_id={self.real_exercise_id}, "
+            f"status={self.status}, "
+            f"commit_hash={self.commit_hash}, "
+            f"corrects={self.corrects}, "
+            f"score={self.score}, "
+            f"is_compiled={self.is_compiled}, "
+            f"compiled_message={self.compiled_message}, "
+            f"commit_time={self.commit_time}, "
+            f"compilation_started_time={self.compilation_started_time}, "
+            f"compilation_finished_time={self.compilation_finished_time}, "
+            f"compiled_signal={self.compiled_signal}, "
+            f"compiled_error={self.compiled_error}, "
+            f"user_ip={self.user_ip}, "
+            f"aws_key={self.aws_key}, "
+            f"offering_id={self.offering_id}, "
+            f"real_offering_id={self.real_offering_id}, "
+            f"course_id={self.course_id})"
         )

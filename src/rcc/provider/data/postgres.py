@@ -6,7 +6,7 @@ import psycopg
 import psycopg.conninfo
 from psycopg_pool import AsyncConnectionPool
 
-from ...config import DEFAULT_CONCURRENCY_PER_WORKER, Config
+from ...config import Config, total_slots
 from ...languages import language_from_extension
 from ...model import Commit, TestCase, TestCaseResult
 from .data_provider import DataProvider
@@ -19,11 +19,8 @@ class Postgres(DataProvider):
     `psycopg_pool.AsyncConnectionPool`, created lazily by :meth:`open` and
     released by :meth:`close`.
 
-    One pool is created *per process*: one in the main polling process and
-    one in every worker process. Pools hold live sockets and background
-    tasks and cannot be shared across processes, so the pool is opened after
-    the multiprocessing workers have been spawned and is deliberately
-    stripped when this object is pickled (see :meth:`__getstate__`).
+    One pool serves the whole (single-process) compiler: it is opened once
+    before the consumers start pulling and closed on shutdown.
     """
 
     _conninfo: str
@@ -45,17 +42,14 @@ class Postgres(DataProvider):
         # bursts (one transaction per provider call), so one connection per
         # in-flight commit is enough for the steady state. When
         # ``pool_max_size`` is not configured explicitly it is derived from
-        # the per-process concurrency as ``concurrency + 2`` (clamped to at
-        # least ``pool_min_size``); the +2 margin covers transient overlap
-        # between a finishing commit and the next one starting. An explicit
-        # ``pool_max_size`` always wins.
+        # the total number of commit slots as ``num_workers * concurrency + 2``
+        # (clamped to at least ``pool_min_size``); the +2 margin covers
+        # transient overlap between a finishing commit and the next one
+        # starting. An explicit ``pool_max_size`` always wins.
         self._pool_min_size = int(str(db.get("pool_min_size", 1)))
         explicit_max_size = db.get("pool_max_size")
         if explicit_max_size is None:
-            concurrency = int(
-                str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
-            )
-            self._pool_max_size = max(concurrency + 2, self._pool_min_size)
+            self._pool_max_size = max(total_slots(cfg) + 2, self._pool_min_size)
         else:
             self._pool_max_size = int(str(explicit_max_size))
         self._pool_timeout = float(str(db.get("pool_timeout", 30.0)))
@@ -68,17 +62,8 @@ class Postgres(DataProvider):
 
     @property
     def pool_max_size(self) -> int:
-        """Configured maximum pool size (derived from concurrency if unset)."""
+        """Configured maximum pool size (derived from the total slots if unset)."""
         return self._pool_max_size
-
-    @override
-    def __getstate__(self) -> dict[str, object]:
-        # A pool holds live connections, threads and background tasks and
-        # cannot be pickled or forked. Every process must open its own pool
-        # by calling `open()` after the process has started.
-        state: dict[str, object] = self.__dict__.copy()
-        state["_pool"] = None
-        return state
 
     @property
     def is_open(self) -> bool:
@@ -283,18 +268,20 @@ class Postgres(DataProvider):
         # `async with pool.connection()` block commits on clean exit and rolls
         # everything back if any insert fails.
         async with self._acquire().connection() as conn, conn.cursor() as cursor:
+            # mem_used, output, output_type and error are never populated:
+            # they keep their column defaults.
             for test_case_result in test_results:
                 data = (
                     commit.id,
                     test_case_result.test_case_id,
                     test_case_result.cpu_time,
-                    test_case_result.mem_used,  # unused
-                    test_case_result.output,  # unused
-                    test_case_result.output_type,  # unused
+                    test_case_result.mem_used,
+                    test_case_result.output,
+                    test_case_result.output_type,
                     test_case_result.status,
                     test_case_result.status_message,
                     test_case_result.error,
-                )  # unused
+                )
                 _ = await cursor.execute(query, data)
 
     @override

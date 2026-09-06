@@ -2,8 +2,6 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
-import multiprocessing as mp
-import multiprocessing.queues as mp_queues
 import sys
 import time
 from typing import cast
@@ -30,14 +28,15 @@ def setup_logger(name: str, log_config: dict[str, object] | None) -> logging.Log
 
     console_handler = logging.StreamHandler(sys.stderr)
     console_fmt = logging.Formatter(
-        "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
+        "[%(asctime)s] %(module)s:%(lineno)d: <%(taskName)s> %(message)s",
+        defaults={"taskName": "-"},
     )
     console_handler.setFormatter(console_fmt)
     logger.addHandler(console_handler)
 
     if log_config is not None:
-        fmt = "%(asctime)s [%(levelname)s] <%(process)d> %(message)s"
-        formatter = logging.Formatter(fmt)
+        fmt = "%(asctime)s [%(levelname)s] <%(taskName)s> %(message)s"
+        formatter = logging.Formatter(fmt, defaults={"taskName": "-"})
         handler = logging.handlers.TimedRotatingFileHandler(
             str(log_config["file"]), when="D"
         )
@@ -46,10 +45,6 @@ def setup_logger(name: str, log_config: dict[str, object] | None) -> logging.Log
         logger.addHandler(handler)
 
     return logger
-
-
-def commit_filter(_: Commit) -> bool:
-    return True
 
 
 def select_new_commits(
@@ -74,32 +69,33 @@ def select_new_commits(
     return [commit for commit in commits if commit.id not in recently_enqueued]
 
 
-async def _stop_workers(
-    engine_workers: list[mp.Process],
-    task_queue: mp_queues.JoinableQueue[Commit | None],
+async def _stop_consumers(
+    engine_consumers: list[asyncio.Task[None]],
+    task_queue: asyncio.Queue[Commit | None],
     logger: logging.Logger,
 ) -> None:
-    """Ask the workers to stop and wait for them to finish.
+    """Ask the consumers to stop and wait for them to finish.
 
-    The ``None`` hints are put through a thread: the task queue is bounded,
-    so a full queue would otherwise block the event loop while the workers
-    drain it. A second interruption aborts the wait and terminates every
-    worker.
+    The ``None`` hints are put directly on the task queue: the queue is
+    bounded, so a full queue makes the puts wait until the consumers drain
+    it (which is exactly the graceful stop condition). A second interruption
+    aborts the wait and cancels every consumer.
     """
     try:
-        for worker in engine_workers:
-            # The 'None' task is a hint for workers to stop processing
-            if worker.is_alive():
-                await asyncio.to_thread(task_queue.put, None)
+        for consumer in engine_consumers:
+            if not consumer.done():
+                await task_queue.put(None)
 
-        # Join each worker to ensure all of them are done
-        for worker in engine_workers:
-            worker.join()
+        # Wait for every consumer to finish draining its in-flight commits.
+        results = await asyncio.gather(*engine_consumers, return_exceptions=True)
+        for consumer, result in zip(engine_consumers, results, strict=True):
+            if isinstance(result, BaseException):
+                logger.error("Consumer failed during shutdown", exc_info=result)
     except KeyboardInterrupt:
-        # Give up and terminate everything
+        # Give up and cancel everything
         logger.info("Aborted")
-        for worker in engine_workers:
-            worker.terminate()
+        for consumer in engine_consumers:
+            _ = consumer.cancel()
 
 
 def task_queue_maxsize(cfg: config.Config) -> int:
@@ -112,11 +108,11 @@ def task_queue_maxsize(cfg: config.Config) -> int:
     return config.queue_maxsize(cfg)
 
 
-async def main() -> None:
-    # Imported here (and not at module level) to break the import cycle:
-    # rcc.engine imports submodules of this package.
-    from . import engine
+def _load_config() -> tuple[config.Config, logging.Logger]:
+    """Parse arguments, build the configuration and set up logging.
 
+    Exits the process when the configuration is invalid.
+    """
     args = vars(parse_args())
     config_arg = str(args.get("config"))
     try:
@@ -135,16 +131,72 @@ async def main() -> None:
     logger = setup_logger(config.DEFAULT_LOGGER, log_config)
 
     # Refuse to start on nonsensical parallelism values instead of crashing
-    # obscurely later (e.g. a semaphore of size 0 deadlocking every worker).
+    # obscurely later (e.g. a semaphore of size 0 deadlocking every consumer).
     try:
         config.validate(cfg)
     except config.ConfigError as e:
         logger.error(f"Invalid configuration: {e}")
         sys.exit(1)
 
+    return cfg, logger
+
+
+async def _poll_commits(
+    data_provider: data.DataProvider,
+    task_queue: asyncio.Queue[Commit | None],
+    cfg: config.Config,
+    logger: logging.Logger,
+) -> None:
+    """Poll the database forever, feeding new commits into ``task_queue``.
+
+    Every commit still STATUS_IN_QUEUE is re-fetched on each cycle, so
+    recently enqueued ids are suppressed (see :func:`select_new_commits`):
+    without this a commit waiting in the queue for a free consumer would be
+    enqueued again and again. Consumer-side claiming already makes such
+    duplicates harmless; this only avoids wasting queue capacity and claim
+    round trips.
+    """
+    recently_enqueued: dict[int, float] = {}
+    commit_suppression = float(
+        str(
+            cfg.get(
+                "commit_enqueue_suppression",
+                config.DEFAULT_COMMIT_ENQUEUE_SUPPRESSION,
+            )
+        )
+    )
+    sleeper = util.Sleeper(
+        cast(float, cfg.min_sleep_time), cast(float, cfg.max_sleep_time)
+    )
+
+    while True:
+        try:
+            commits = await data_provider.fetch_commits_in_queue()
+            commits = select_new_commits(commits, recently_enqueued, commit_suppression)
+        except Exception:
+            logger.exception("Could not fetch commits")
+            commits = []
+        for commit in commits:
+            await task_queue.put(commit)
+            recently_enqueued[commit.id] = time.monotonic()
+        if commits:
+            sleeper.reset()
+        await asyncio.sleep(sleeper.sleep_time())
+
+
+async def main() -> None:
+    # Imported here (and not at module level) to break the import cycle:
+    # rcc.engine imports submodules of this package.
+    from . import engine
+
+    if (current := asyncio.current_task()) is not None:
+        current.set_name("poller")
+
+    cfg, logger = _load_config()
+
     num_workers, concurrency = config.parallelism_values(cfg)
     logger.info(
-        f"Parallelism: workers={num_workers}, concurrency={concurrency}, max_in_flight={config.total_slots(cfg)}"
+        f"Parallelism: consumers={num_workers}, concurrency={concurrency}, max_in_flight={config.total_slots(cfg)}"
     )
 
     with util.SingletonContext(cast(str, cfg.lock_file)):
@@ -153,85 +205,47 @@ async def main() -> None:
 
         data_provider = data.from_config(cfg)
 
-        # Bounded task queue (2x the commit slots across all workers): a
-        # blocking put() is the backpressure mechanism. Putting is offloaded
-        # to a thread so a full queue never blocks the event loop.
-        task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue(
+        # Bounded task queue (2x the commit slots): the awaited put() below
+        # is the backpressure mechanism.
+        task_queue: asyncio.Queue[Commit | None] = asyncio.Queue(
             maxsize=task_queue_maxsize(cfg)
         )
-        engine_workers = [
-            mp.Process(target=engine.run_worker, args=(data_provider, task_queue, cfg))
-            for _ in range(cast(int, cfg.num_workers))
-        ]
+        engine_consumers: list[asyncio.Task[None]] = []
 
-        # Poll for new commits and put them in our internal processing queue
         try:
-            sleeper = util.Sleeper(
-                cast(float, cfg.min_sleep_time), cast(float, cfg.max_sleep_time)
-            )
-            for worker in engine_workers:
-                worker.start()
-
-            # Open this process's own connection pool. This happens after the
-            # workers have been spawned so the pool is never forked into or
-            # pickled towards a child process (every process opens its own
-            # pool). Connections are established lazily, so a database that is
-            # not up yet does not crash the process: poll cycles simply fail
-            # and are retried
+            # Open the single process-wide connection pool before the
+            # consumers start pulling, so their first claim round trips find
+            # it ready. Connections are established lazily, so a database
+            # that is not up yet does not crash the process: poll cycles
+            # simply fail and are retried.
             await data_provider.open()
 
-            # Suppress duplicate enqueueing: the poller re-fetches every
-            # commit that is still STATUS_IN_QUEUE on each cycle, so without
-            # this a commit waiting in the queue for a free worker would be
-            # put on it again and again. Worker-side claiming already makes
-            # such duplicates harmless; this only avoids wasting queue
-            # capacity and claim round trips on them. See
-            # :func:`select_new_commits` for the pruning rules.
-            recently_enqueued: dict[int, float] = {}
-            commit_suppression = float(
-                str(
-                    cfg.get(
-                        "commit_enqueue_suppression",
-                        config.DEFAULT_COMMIT_ENQUEUE_SUPPRESSION,
-                    )
+            engine_consumers = [
+                asyncio.create_task(
+                    engine.process_commits(
+                        data_provider, task_queue, cfg, manage_pool=False
+                    ),
+                    name=f"consumer-{i}",
                 )
-            )
+                for i in range(cast(int, cfg.num_workers))
+            ]
 
-            while True:
-                try:
-                    commits = await data_provider.fetch_commits_in_queue()
-                    commits = list(filter(commit_filter, commits))
-                    commits = select_new_commits(
-                        commits, recently_enqueued, commit_suppression
-                    )
-                except Exception:
-                    logger.exception("Could not fetch commits")
-                    commits = []
-                if len(commits) > 0:
-                    for commit in commits:
-                        # Blocking put on a bounded queue = backpressure:
-                        # the loop stalls here while the workers drain, so
-                        # no join() barrier is needed.
-                        await asyncio.to_thread(task_queue.put, commit)
-                        recently_enqueued[commit.id] = time.monotonic()
-                    sleeper.reset()
-                await asyncio.sleep(sleeper.sleep_time())
+            await _poll_commits(data_provider, task_queue, cfg, logger)
         except KeyboardInterrupt:
             # Only possible for a second Ctrl-C while the first one is already
             # being handled (see the CancelledError branch below).
-            logger.info("Interrupted; waiting for workers")
-            await _stop_workers(engine_workers, task_queue, logger)
+            logger.info("Interrupted; waiting for consumers")
+            await _stop_consumers(engine_consumers, task_queue, logger)
         except asyncio.CancelledError:
             # asyncio.run() (Python >= 3.11) translates the first Ctrl-C into
             # cancellation of this task. Run the same graceful shutdown, then
             # re-raise so asyncio.run() turns the cancellation back into a
             # KeyboardInterrupt for the caller.
-            logger.info("Interrupted; waiting for workers")
-            await _stop_workers(engine_workers, task_queue, logger)
+            logger.info("Interrupted; waiting for consumers")
+            await _stop_consumers(engine_consumers, task_queue, logger)
             raise
         finally:
             await data_provider.close()
-            # Also reached on (gracefully handled) interruption.
             logger.info("Exited")
 
 

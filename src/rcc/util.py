@@ -5,11 +5,10 @@ Collection of utilities.
 import datetime
 import fcntl
 import os
-import signal
 import time
 import zipfile
 from collections.abc import Callable, Iterable
-from types import FrameType, TracebackType
+from types import TracebackType
 from typing import Self, TextIO
 
 from .languages import language_from_extension
@@ -53,29 +52,6 @@ class SingletonContext:
             self.lock_file.close()
         if self.remove_at_exit:
             os.unlink(self.lock_fname)
-
-
-class UninterruptibleContext:
-    """Make a region of code 'immune' to Ctrl-C."""
-
-    sigint_handler: (
-        Callable[[int, FrameType | None], object] | int | signal.Handlers | None
-    )
-
-    def __init__(self) -> None:
-        self.sigint_handler = signal.SIG_DFL
-
-    def __enter__(self) -> Self:
-        self.sigint_handler = signal.signal(signal.SIGINT, signal.SIG_IGN)
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> None:
-        _ = signal.signal(signal.SIGINT, self.sigint_handler)
 
 
 class Sleeper:

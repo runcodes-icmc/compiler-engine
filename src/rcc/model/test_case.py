@@ -55,38 +55,21 @@ class TestCase:
 
     @override
     def __str__(self) -> str:
-        s = (
-            "TestCase("
-            "id={}, "
-            "exercise_id={}, "
-            "input_type={}, "
-            "output_type={}, "
-            "show_input={}, "
-            "show_expected_output={}, "
-            "max_mem_size={}, "
-            "cpu_time={}, "
-            "stack_size={}, "
-            "show_user_output={}, "
-            "file_size={}, "
-            "abs_error={}, "
-            "last_update={}, "
-            "files={})"
-        )
-        return s.format(
-            self.id,
-            self.exercise_id,
-            self.input_type,
-            self.output_type,
-            self.show_input,
-            self.show_expected_output,
-            self.max_mem_size,
-            self.cpu_time,
-            self.stack_size,
-            self.show_user_output,
-            self.file_size,
-            self.abs_error,
-            self.last_update,
-            self.files,
+        return (
+            f"TestCase(id={self.id}, "
+            f"exercise_id={self.exercise_id}, "
+            f"input_type={self.input_type}, "
+            f"output_type={self.output_type}, "
+            f"show_input={self.show_input}, "
+            f"show_expected_output={self.show_expected_output}, "
+            f"max_mem_size={self.max_mem_size}, "
+            f"cpu_time={self.cpu_time}, "
+            f"stack_size={self.stack_size}, "
+            f"show_user_output={self.show_user_output}, "
+            f"file_size={self.file_size}, "
+            f"abs_error={self.abs_error}, "
+            f"last_update={self.last_update}, "
+            f"files={self.files})"
         )
 
 
@@ -131,27 +114,14 @@ class TestCaseResult:
 
     @override
     def __str__(self) -> str:
-        s = (
-            "TestCaseResult("
-            "commit_id={}, "
-            "test_case_id={}, "
-            "cpu_time={}, "
-            "status={}, "
-            "status_message={}, "
-            "mem_used={}, "
-            "output={}, "
-            "output_type={}, "
-            "error={})"
-        )
-        return s.format(
-            self.id,
-            self.commit_id,
-            self.test_case_id,
-            self.cpu_time,
-            self.status,
-            self.status_message,
-            self.mem_used,
-            self.output,
-            self.output_type,
-            self.error,
+        return (
+            f"TestCaseResult(commit_id={self.commit_id}, "
+            f"test_case_id={self.test_case_id}, "
+            f"cpu_time={self.cpu_time}, "
+            f"status={self.status}, "
+            f"status_message={self.status_message}, "
+            f"mem_used={self.mem_used}, "
+            f"output={self.output}, "
+            f"output_type={self.output_type}, "
+            f"error={self.error})"
         )

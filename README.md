@@ -15,11 +15,11 @@ The project's configuration is done through environment variables, which can be 
 
 The engine processes commits through two nested knobs:
 
-- `RUNCODES_COMPILER_NUM_WORKERS` (default `2`): the number of multiprocessing
-  worker processes. Each worker owns its own event loop and its own database
-  connection pool.
+- `RUNCODES_COMPILER_NUM_WORKERS` (default `2`): the number of consumer tasks
+  running on the engine's single event loop. Each consumer owns a share of
+  the concurrency below.
 - `RUNCODES_COMPILER_CONCURRENCY` (default `4`): the number of commits each
-  worker processes concurrently.
+  consumer processes concurrently.
 
 The total number of in-flight commits is the product of the two
 (`num_workers × concurrency`, default 2×4 = 8). The same values are read from
@@ -28,10 +28,10 @@ keys (see `config/rcc/config.json.example`).
 
 The workload is IO-bound (containers, S3, database), so sizing has nothing to
 do with the CPU count: the real ceiling is how many compilation containers
-the Docker host can run at once, plus available RAM. Worker processes are the
-expensive part of the pipeline — each adds an interpreter copy, an event loop
-and a database connection pool — so when the host can take more in-flight
-work, prefer raising the concurrency before adding processes.
+the Docker host can run at once, plus available RAM. The whole engine runs in
+a single process (threads would not add parallelism for IO-bound work), so
+when the host can take more in-flight work, raise the concurrency and/or the
+number of consumer tasks.
 
 On startup the engine validates the values (`num_workers >= 1`,
 `concurrency >= 1`, and a bounded task queue at least as large as the total
@@ -41,13 +41,12 @@ max_in_flight=8`).
 
 ### Database pool sizing
 
-Every process (the main poller and each worker) owns its own `psycopg_pool`
-connection pool, tuned through:
+The engine owns a single `psycopg_pool` connection pool, tuned through:
 
 - `RUNCODES_DB_POOL_MIN_SIZE` (default `1`)
-- `RUNCODES_DB_POOL_MAX_SIZE` — when not set, derived from the per-process
-  concurrency as `concurrency + 2` (clamped to at least the minimum size); an
-  explicitly configured value always wins
+- `RUNCODES_DB_POOL_MAX_SIZE` — when not set, derived from the total
+  in-flight slots as `num_workers × concurrency + 2` (clamped to at least the
+  minimum size); an explicitly configured value always wins
 - `RUNCODES_DB_POOL_TIMEOUT` (default `30` seconds)
 
 One pooled connection per in-flight commit is enough because a commit only

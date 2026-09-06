@@ -295,9 +295,9 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dbname=runcodes", conninfo)
         self.assertIn("user=user", conninfo)
 
-    def test_pool_max_size_derived_from_concurrency(self) -> None:
+    def test_pool_max_size_derived_from_total_slots(self) -> None:
         provider = Postgres(make_cfg(concurrency=4))
-        self.assertEqual(provider.pool_max_size, 6)
+        self.assertEqual(provider.pool_max_size, 10)
 
     def test_pool_max_size_derived_value_clamped_to_min_size(self) -> None:
         provider = Postgres(make_cfg(concurrency=1, pool_min_size=5))
@@ -307,11 +307,12 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         provider = Postgres(make_cfg(concurrency=4, pool_max_size=100))
         self.assertEqual(provider.pool_max_size, 100)
 
-    def test_pool_max_size_derivation_uses_default_concurrency(self) -> None:
+    def test_pool_max_size_derivation_uses_default_parallelism(self) -> None:
         provider = Postgres(make_cfg())
         self.assertEqual(
             provider.pool_max_size,
-            rcc.config.DEFAULT_CONCURRENCY_PER_WORKER + 2,
+            rcc.config.DEFAULT_NUM_WORKERS * rcc.config.DEFAULT_CONCURRENCY_PER_WORKER
+            + 2,
         )
 
     async def test_open_uses_derived_max_size_when_not_configured(self) -> None:
@@ -321,7 +322,7 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
             provider = Postgres(make_cfg(concurrency=3))
             await provider.open()
         (pool,) = RecordingPool.instances
-        self.assertEqual(pool.kwargs["max_size"], 5)
+        self.assertEqual(pool.kwargs["max_size"], 8)
 
     async def test_open_is_idempotent(self) -> None:
         with mock.patch(
@@ -373,18 +374,6 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         conn = psycopg.AsyncConnection.__new__(psycopg.AsyncConnection)
         with self.assertRaises(AttributeError):
             conn.autocommit = False
-
-    async def test_pickling_drops_pool(self) -> None:
-        import pickle
-
-        provider = Postgres(make_cfg())
-        provider._pool = cast(  # pyright: ignore[reportPrivateUsage]
-            psycopg_pool.AsyncConnectionPool[psycopg.AsyncConnection], object()
-        )
-        clone = cast(Postgres, pickle.loads(pickle.dumps(provider)))
-        self.assertIsNone(clone._pool)  # pyright: ignore[reportPrivateUsage]
-        # The configuration itself survives pickling.
-        self.assertEqual(clone.pool_min_size, provider.pool_min_size)
 
 
 class TestPostgresQueries(unittest.IsolatedAsyncioTestCase):

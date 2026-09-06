@@ -3,7 +3,7 @@ Unit tests for the parallel commit pipeline (no docker daemon required).
 
 Covers:
 - the container log reader thread adapter (ordering, sentinel, timeouts),
-- the per-worker semaphore concurrency (M slots, no slot leaks, stop hints),
+- the per-consumer semaphore concurrency (M slots, no slot leaks, stop hints),
 - the bounded task queue backpressure in ``rcc.main()``.
 """
 
@@ -11,14 +11,11 @@ import argparse
 import asyncio
 import datetime
 import logging
-import multiprocessing as mp
-import multiprocessing.queues as mp_queues
 import tempfile
-import threading
 import time
 import unittest
 from collections.abc import Callable, Iterable
-from typing import ClassVar, Protocol, Self, cast, override
+from typing import ClassVar, Self, override
 from unittest import mock
 
 import rcc
@@ -181,37 +178,6 @@ class ClaimingProvider(TrackingProvider):
         self.claimed.discard(commit.id)
 
 
-class _SemLock(Protocol):
-    """Shape of ``multiprocessing.synchronize.SemLock`` (not in typeshed)."""
-
-    def _get_value(self) -> int: ...
-
-
-class _CounterSemaphore(Protocol):
-    """Shape of the ``Semaphore`` counting unfinished JoinableQueue tasks."""
-
-    _semlock: _SemLock
-
-
-class _UnfinishedCounter(Protocol):
-    """Shape of a JoinableQueue's private unfinished-task counter."""
-
-    _unfinished_tasks: _CounterSemaphore
-
-
-def unfinished_tasks(q: object) -> int:
-    """Number of items put on a JoinableQueue but not yet task_done()'d.
-
-    ``multiprocessing.queues.JoinableQueue`` keeps the counter in a private
-    ``Semaphore`` and does not expose it as an attribute (unlike
-    ``queue.Queue``). That chain of private members is not modeled in
-    typeshed, so it is typed here with casts; the private-access check is
-    deliberately suppressed for this documented white-box access.
-    """
-    counter = cast(_UnfinishedCounter, q)
-    return counter._unfinished_tasks._semlock._get_value()  # pyright: ignore[reportPrivateUsage]
-
-
 class TestContainerLogReader(unittest.IsolatedAsyncioTestCase):
     def _reader(
         self, generator: Iterable[bytes | str]
@@ -296,13 +262,13 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         commits: list[Commit],
         concurrency: int,
         fake_process_commit: Callable[..., object],
-    ) -> tuple[TrackingProvider, mp_queues.JoinableQueue[Commit | None]]:
+    ) -> tuple[TrackingProvider, asyncio.Queue[Commit | None]]:
         provider = TrackingProvider()
         cfg = make_cfg(concurrency)
-        task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue()
+        task_queue: asyncio.Queue[Commit | None] = asyncio.Queue()
         for commit in commits:
-            task_queue.put(commit)
-        task_queue.put(None)
+            task_queue.put_nowait(commit)
+        task_queue.put_nowait(None)
         with mock.patch.object(rcc.engine, "process_commit", fake_process_commit):
             await rcc.engine.process_commits(provider, task_queue, cfg)
         return provider, task_queue
@@ -331,7 +297,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(max_active, 2)
         self.assertEqual(sorted(finished), [0, 1, 2, 3, 4])
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
 
@@ -350,7 +316,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
             [make_commit(1), make_commit(2), make_commit(3)], 2, fake
         )
         self.assertEqual(sorted(finished), [1, 2, 3])
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
 
@@ -385,7 +351,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         # run two at a time (with a leaked slot they would be serialized).
         self.assertEqual(sorted(finished), [2, 3, 4, 5])
         self.assertEqual(max_active, 2)
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
 
     async def test_non_retryable_failure_stops_the_worker(self) -> None:
         finished: list[int] = []
@@ -430,10 +396,10 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
 
         provider = ClaimingProvider()
         cfg = make_cfg(2)
-        task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue()
+        task_queue: asyncio.Queue[Commit | None] = asyncio.Queue()
         for commit in (make_commit(1), make_commit(1), make_commit(2)):
-            task_queue.put(commit)
-        task_queue.put(None)
+            task_queue.put_nowait(commit)
+        task_queue.put_nowait(None)
         with mock.patch.object(rcc.engine, "process_commit", fake):
             await rcc.engine.process_commits(provider, task_queue, cfg)
 
@@ -441,7 +407,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(processed), [1, 2])
         self.assertEqual(provider.claim_count, 3)
         self.assertEqual(provider.claimed, {1, 2})
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
 
     async def test_retryable_failure_releases_the_claim(self) -> None:
         """A claimed commit that fails retryably goes back to IN_QUEUE."""
@@ -455,9 +421,9 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
 
         provider = ClaimingProvider()
         cfg = make_cfg(2)
-        task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue()
-        task_queue.put(make_commit(1))
-        task_queue.put(None)
+        task_queue: asyncio.Queue[Commit | None] = asyncio.Queue()
+        task_queue.put_nowait(make_commit(1))
+        task_queue.put_nowait(None)
         with mock.patch.object(rcc.engine, "process_commit", fake):
             await rcc.engine.process_commits(provider, task_queue, cfg)
 
@@ -465,7 +431,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(provider.release_count, 1)
         # The claim was given back: a later pull may take the commit again.
         self.assertEqual(provider.claimed, set())
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
 
 
 class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
@@ -495,11 +461,11 @@ class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
             cfg = make_cfg(2, exec_dir=tmpdir)
             provider = TrackingProvider()
             storage = FakeStorage(cfg)
-            task_queue: mp_queues.JoinableQueue[Commit | None] = mp.JoinableQueue()
+            task_queue: asyncio.Queue[Commit | None] = asyncio.Queue()
             commits = [make_commit(i) for i in range(3)]
             for commit in commits:
-                task_queue.put(commit)
-            task_queue.put(None)
+                task_queue.put_nowait(commit)
+            task_queue.put_nowait(None)
 
             with (
                 mock.patch.object(
@@ -510,79 +476,45 @@ class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
                 await rcc.engine.process_commits(provider, task_queue, cfg)
 
         self.assertEqual(max_active, 2)
-        # The multiprocessing queue pickles items, so the worker mutated
-        # copies; observe the final statuses through the provider instead.
+        # The queue no longer pickles items: the consumers mutated these very
+        # objects, so their final statuses are observable directly.
         for commit in commits:
-            self.assertEqual(
-                provider.commit_statuses[commit.id], Commit.STATUS_COMPLETED
-            )
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+            self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
+        self.assertEqual(task_queue.qsize(), 0)
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
 
 
-class RecordingJoinableQueue(mp_queues.JoinableQueue[Commit | None]):
-    """Records the maxsize used to construct the queue.
+class RecordingQueue(asyncio.Queue[Commit | None]):
+    """Records every queue construction so tests can inspect the created one.
 
-    ``multiprocessing.JoinableQueue`` is a factory function, so the concrete
-    class from ``multiprocessing.queues`` is subclassed instead. The maxsize
-    is also copied to a public attribute: the concrete class stores it in a
-    private ``_maxsize`` member.
+    The constructed ``maxsize`` stays inspectable through the read-only
+    :attr:`asyncio.Queue.maxsize` property.
     """
 
-    instances: ClassVar[list[RecordingJoinableQueue]] = []
-    maxsize: int
+    instances: ClassVar[list[RecordingQueue]] = []
 
     def __init__(self, maxsize: int = 0) -> None:
-        super().__init__(maxsize, ctx=mp.get_context())
-        self.maxsize = maxsize
-        RecordingJoinableQueue.instances.append(self)
+        super().__init__(maxsize=maxsize)
+        RecordingQueue.instances.append(self)
 
 
-class RecordingPutQueue(mp_queues.JoinableQueue[Commit | None]):
-    """JoinableQueue that records the ids of everything put into it."""
+class RecordingPutQueue(asyncio.Queue[Commit | None]):
+    """Task queue that records the ids of everything put into it."""
 
     instances: ClassVar[list[RecordingPutQueue]] = []
     put_ids: list[int]
 
     def __init__(self, maxsize: int = 0) -> None:
-        super().__init__(maxsize, ctx=mp.get_context())
+        super().__init__(maxsize=maxsize)
         self.put_ids = []
         RecordingPutQueue.instances.append(self)
 
     @override
-    def put(
-        self,
-        obj: Commit | None,
-        block: bool = True,
-        timeout: float | None = None,
-    ) -> None:
-        if obj is not None:
-            self.put_ids.append(obj.id)
-        super().put(obj, block, timeout)
-
-
-class FakeProcess:
-    """Runs the mp.Process target in a daemon thread (no real fork/spawn)."""
-
-    _thread: threading.Thread
-
-    def __init__(
-        self, target: Callable[..., object], args: tuple[object, ...] = ()
-    ) -> None:
-        self._thread = threading.Thread(target=target, args=args, daemon=True)
-
-    def start(self) -> None:
-        self._thread.start()
-
-    def is_alive(self) -> bool:
-        return self._thread.is_alive()
-
-    def join(self) -> None:
-        self._thread.join()
-
-    def terminate(self) -> None:
-        pass
+    def put_nowait(self, item: Commit | None) -> None:
+        if item is not None:
+            self.put_ids.append(item.id)
+        super().put_nowait(item)
 
 
 class _NullSingletonContext:
@@ -601,26 +533,25 @@ class _NullSingletonContext:
         return False
 
 
-WORKER_COMMIT_SECONDS = 0.3
+CONSUMER_COMMIT_SECONDS = 0.3
 
 
-def fake_worker(
+async def fake_consumer(
     _data_provider: DataProvider,
-    task_queue: mp_queues.JoinableQueue[Commit | None],
+    task_queue: asyncio.Queue[Commit | None],
     _cfg: rcc.config.Config,
+    manage_pool: bool = True,  # pyright: ignore[reportUnusedParameter]
 ) -> None:
-    """Stand-in for ``rcc.engine.run_worker`` inside a FakeProcess thread.
+    """Stand-in for ``rcc.engine.process_commits`` as a consumer task.
 
-    Mirrors the real worker's queue bookkeeping: one task_done() per pulled
-    item, including the None stop hint.
+    Mirrors the real consumer's pull semantics: one item per loop turn,
+    sleeping to simulate slow work, and stopping on the None hint.
     """
     while True:
-        item = task_queue.get()
+        item = await task_queue.get()
         if item is None:
-            task_queue.task_done()
             return
-        time.sleep(WORKER_COMMIT_SECONDS)
-        task_queue.task_done()
+        await asyncio.sleep(CONSUMER_COMMIT_SECONDS)
 
 
 class PollingProvider(rcc.provider.data.DataProvider):
@@ -720,7 +651,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
                 "log": None,
             }
         )
-        RecordingJoinableQueue.instances = []
+        RecordingQueue.instances = []
 
         patches = [
             mock.patch.object(rcc.config, "from_env", return_value=cfg),
@@ -732,9 +663,8 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch.object(rcc.util, "SingletonContext", _NullSingletonContext),
             mock.patch.object(rcc.provider.data, "from_config", return_value=provider),
-            mock.patch.object(rcc.engine, "run_worker", fake_worker),
-            mock.patch.object(mp, "Process", FakeProcess),
-            mock.patch.object(mp, "JoinableQueue", RecordingJoinableQueue),
+            mock.patch.object(rcc.engine, "process_commits", fake_consumer),
+            mock.patch.object(asyncio, "Queue", RecordingQueue),
         ]
         for patch in patches:
             _ = patch.start()
@@ -743,10 +673,10 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             await asyncio.sleep(0.5)
 
             # The bounded queue (maxsize 2) filled after two instant puts; the
-            # third put blocks until the slow fake worker consumes one, so the
+            # third put blocks until the slow fake consumer pulls one, so the
             # polling loop must not have fetched a second batch yet.
             self.assertEqual(provider.fetch_count, 1)
-            (task_queue,) = RecordingJoinableQueue.instances
+            (task_queue,) = RecordingQueue.instances
             self.assertEqual(task_queue.maxsize, 2)
 
             # Simulate Ctrl-C (the first Ctrl-C cancels main()).
@@ -757,11 +687,12 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             for patch in reversed(patches):
                 patch.stop()
 
-        # The shutdown sequence ran: worker drained the queue (including the
-        # None hint) and the provider pool was opened and closed once.
+        # The shutdown sequence ran: the consumer drained the queue
+        # (including the None hint) and the provider pool was opened and
+        # closed once.
         self.assertEqual(provider.open_count, 1)
         self.assertEqual(provider.close_count, 1)
-        self.assertEqual(unfinished_tasks(task_queue), 0)
+        self.assertEqual(task_queue.qsize(), 0)
 
     async def _run_main_with_repeating_commit(
         self, provider: DataProvider, cfg: rcc.config.Config, runtime: float
@@ -778,9 +709,8 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
             ),
             mock.patch.object(rcc.util, "SingletonContext", _NullSingletonContext),
             mock.patch.object(rcc.provider.data, "from_config", return_value=provider),
-            mock.patch.object(rcc.engine, "run_worker", fake_worker),
-            mock.patch.object(mp, "Process", FakeProcess),
-            mock.patch.object(mp, "JoinableQueue", RecordingPutQueue),
+            mock.patch.object(rcc.engine, "process_commits", fake_consumer),
+            mock.patch.object(asyncio, "Queue", RecordingPutQueue),
         ]
         for patch in patches:
             _ = patch.start()
@@ -840,7 +770,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
         )
 
         # After the 0.1 s window expired the poller re-enqueued the commit on
-        # the following cycles (a worker may have died before claiming it).
+        # the following cycles (a consumer may have died before claiming it).
         self.assertGreaterEqual(task_queue.put_ids.count(1), 3)
 
 

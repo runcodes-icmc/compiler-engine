@@ -4,9 +4,7 @@ import datetime
 import filecmp
 import itertools as it
 import logging
-import multiprocessing.queues as mp_queues
 import os
-import queue
 import shutil
 import sys
 import threading
@@ -30,7 +28,6 @@ from .languages import language_from_extension
 from .model import Commit, TestCase, TestCaseResult
 from .provider import storage
 from .util import (
-    UninterruptibleContext,
     count_if,
     deduce_language,
     is_compilable,
@@ -38,13 +35,16 @@ from .util import (
 )
 
 if TYPE_CHECKING:
+    from docker.models.containers import Container
+
     from .provider.data import DataProvider
     from .provider.storage import StorageProvider
 
 DEFAULT_MKDIR_PERMISSIONS = 0o777
 
-# How long a worker's pull loop waits on an empty task queue before checking
-# whether a non-retryable failure in an in-flight commit must stop the worker.
+# How long a consumer's pull loop waits on an empty task queue before
+# checking whether a non-retryable failure in an in-flight commit must stop
+# the consumer.
 QUEUE_GET_POLL_TIMEOUT = 1.0
 
 # How long run() waits for the container log reader thread to terminate after
@@ -57,6 +57,9 @@ CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 # worker processes at once), capped here so a single commit with many
 # exercise/test-case files cannot open an unbounded number of connections.
 PREFETCH_MAX_CONCURRENT_DOWNLOADS = 8
+
+# Exceptions that stop a consumer instead of failing just one commit.
+NON_RETRYABLE_EXCEPTIONS = (MemoryError, OSError, SystemExit, SystemError)
 
 
 def _get_config() -> Config:
@@ -423,7 +426,6 @@ async def run(
     A fresh docker client is created per commit: each concurrent task gets its
     own client, which also sidesteps docker-py thread-safety questions.
     """
-    logger = logging.getLogger(DEFAULT_LOGGER)
     cfg = _get_config()
 
     client = await asyncio.to_thread(docker.from_env)
@@ -451,77 +453,107 @@ async def run(
     log_reader.start()
 
     try:
-        if commit.is_compilable:
-            try:
-                # Compilation start
-                await expect_message(
-                    log_reader,
-                    "compilation.start",
-                    cast(float, cfg.compilation_timeout),
-                )
-
-                commit.status = Commit.STATUS_COMPILING
-                await data_provider.update_commit(commit)
-
-                # Compilation done
-                await expect_message(
-                    log_reader, "compilation.done", cast(float, cfg.compilation_timeout)
-                )
-
-                err_fname = os.path.join(base_dir, str(cfg.compilation_error_file))
-                compiled_error = await asyncio.to_thread(
-                    _read_compilation_error_file, err_fname
-                )
-                if compiled_error != "":
-                    commit.status = Commit.STATUS_ERROR
-                    commit.compiled_error = compiled_error
-                    commit.compiled_signal = 1
-                    commit.is_compiled = False
-                else:
-                    commit.status = Commit.STATUS_COMPILED
-                    commit.is_compiled = True
-            except TimeoutError:
-                logger.warning("Compilation timed out", exc_info=True)
-                raise RuntimeError("Compilation timed out")
-        else:
-            # NOTE: does not make much sense, but seems to be needed
-            commit.is_compiled = True
+        await _run_compilation(data_provider, commit, cfg, base_dir, log_reader)
 
         commit.compilation_finished_time = datetime.datetime.now(tz=datetime.UTC)
         await data_provider.update_commit(commit)
 
         if commit.status != Commit.STATUS_ERROR:
-            try:
-                # Test cases execution start
-                base_timeout = cast(float, cfg.base_exec_timeout) * (
-                    1 + len(test_cases)
-                )
-                timeout = base_timeout + sum(c.cpu_time for c in test_cases)
-                await expect_message(log_reader, "run.start", timeout)
+            await _run_execution(data_provider, commit, test_cases, cfg, log_reader)
 
-                commit.status = Commit.STATUS_RUNNING
-                await data_provider.update_commit(commit)
-
-                # Test cases execution done
-                await expect_message(log_reader, "run.done", timeout)
-            except TimeoutError:
-                logger.warning("Execution timed out", exc_info=True)
-                raise RuntimeError("Execution timed out")
-        try:
-            _ = await asyncio.to_thread(
-                container.wait, timeout=cast(float, cfg.base_exec_timeout)
-            )
-        except requests.exceptions.ReadTimeout:
-            logger.exception("Container wait timed out")
-            await asyncio.to_thread(container.kill)
-        finally:
-            # Ensure container is removed
-            try:
-                await asyncio.to_thread(container.remove, force=True)
-            except Exception:
-                logger.exception("Container removal failed")
+        await _teardown_container(container, cfg)
     finally:
         log_reader.stop()
+
+
+async def _run_compilation(
+    data_provider: DataProvider,
+    commit: Commit,
+    cfg: Config,
+    base_dir: str,
+    log_reader: ContainerLogReader,
+) -> None:
+    """Drive the container's compilation phase via its log stream.
+
+    Raises ``RuntimeError`` when the container does not report the
+    ``compilation.done`` message within ``compilation_timeout``.
+    """
+    logger = logging.getLogger(DEFAULT_LOGGER)
+    if not commit.is_compilable:
+        # NOTE: does not make much sense, but seems to be needed
+        commit.is_compiled = True
+        return
+
+    try:
+        await expect_message(
+            log_reader, "compilation.start", cast(float, cfg.compilation_timeout)
+        )
+        commit.status = Commit.STATUS_COMPILING
+        await data_provider.update_commit(commit)
+
+        await expect_message(
+            log_reader, "compilation.done", cast(float, cfg.compilation_timeout)
+        )
+
+        err_fname = os.path.join(base_dir, str(cfg.compilation_error_file))
+        compiled_error = await asyncio.to_thread(
+            _read_compilation_error_file, err_fname
+        )
+        if compiled_error != "":
+            commit.status = Commit.STATUS_ERROR
+            commit.compiled_error = compiled_error
+            commit.compiled_signal = 1
+            commit.is_compiled = False
+        else:
+            commit.status = Commit.STATUS_COMPILED
+            commit.is_compiled = True
+    except TimeoutError:
+        logger.warning("Compilation timed out", exc_info=True)
+        raise RuntimeError("Compilation timed out")
+
+
+async def _run_execution(
+    data_provider: DataProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    cfg: Config,
+    log_reader: ContainerLogReader,
+) -> None:
+    """Drive the container's test execution phase via its log stream.
+
+    Raises ``RuntimeError`` when the container does not report the
+    ``run.done`` message within the test cases' time budget.
+    """
+    logger = logging.getLogger(DEFAULT_LOGGER)
+    try:
+        base_timeout = cast(float, cfg.base_exec_timeout) * (1 + len(test_cases))
+        timeout = base_timeout + sum(c.cpu_time for c in test_cases)
+        await expect_message(log_reader, "run.start", timeout)
+
+        commit.status = Commit.STATUS_RUNNING
+        await data_provider.update_commit(commit)
+
+        await expect_message(log_reader, "run.done", timeout)
+    except TimeoutError:
+        logger.warning("Execution timed out", exc_info=True)
+        raise RuntimeError("Execution timed out")
+
+
+async def _teardown_container(container: Container, cfg: Config) -> None:
+    """Wait for the container, killing it on timeout, then remove it."""
+    logger = logging.getLogger(DEFAULT_LOGGER)
+    try:
+        _ = await asyncio.to_thread(
+            container.wait, timeout=cast(float, cfg.base_exec_timeout)
+        )
+    except requests.exceptions.ReadTimeout:
+        logger.exception("Container wait timed out")
+        await asyncio.to_thread(container.kill)
+    finally:
+        try:
+            await asyncio.to_thread(container.remove, force=True)
+        except Exception:
+            logger.exception("Container removal failed")
 
 
 async def run_tests(
@@ -631,13 +663,11 @@ async def process_commit(
     """Process a single commit: compile it, run its test cases, store results.
 
     Fully async: every interaction with the data provider is awaited. Runs on
-    the caller's event loop (the worker's main loop or a test runner).
+    the caller's event loop (a consumer's main loop or a test runner).
 
-    The prefetch phase overlaps its independent IO so the (much slower)
-    container phase starts as soon as possible: fetching the test cases,
-    deleting stale results and downloading the commit source file all start
-    together, and the per-exercise/per-test-case S3 downloads run
-    concurrently behind a semaphore.
+    The work is split into phases, one helper per phase; a helper returns
+    ``False`` (or ``None``) when it failed the commit (logged and marked
+    INTERNAL_ERROR), which ends processing early.
     """
     if cfg is None:
         cfg = get_config(DEFAULT_CONFIG)
@@ -659,60 +689,131 @@ async def process_commit(
     base_dir = os.path.join(cast(str, cfg.exec_dir), f"commit_{commit.id}")
     remote_dir = os.path.join(cast(str, cfg.exec_dir_remote), f"commit_{commit.id}")
 
-    # Bound for the prefetch S3 downloads: mirror the per-worker commit
-    # concurrency so a worker never opens more simultaneous downloads than it
-    # has in-flight commits, capped at a sane small maximum (and never zero,
-    # which would deadlock every download).
-    concurrency = int(
-        str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
-    )
-    download_semaphore = asyncio.Semaphore(
-        max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
-    )
+    if not await _prepare_work_dir(data_provider, commit, cfg, base_dir):
+        return
 
-    # Remove leftovers from a previous attempt and create the work directory
-    # BEFORE any prefetch download starts, so this cleanup can never delete a
-    # file the prefetch just wrote. The error handling mirrors the "prepare
-    # runs" block below (same log line and STATUS_INTERNAL_ERROR transition).
+    prefetched = await _prefetch_commit_data(
+        data_provider, storage_provider, commit, cfg, base_dir
+    )
+    if prefetched is None:
+        return
+    test_cases, download_task = prefetched
+
+    if not await _prepare_run_files(
+        data_provider,
+        storage_provider,
+        commit,
+        test_cases,
+        cfg,
+        base_dir,
+        download_task,
+    ):
+        return
+
+    logger.debug(f"[{commit.id}] Running tests")
+    try:
+        test_results = await run_tests(
+            data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
+        )
+    except Exception:  # noqa: BLE001
+        await _fail_commit(data_provider, commit, cfg, base_dir, "Failed to run tests")
+        return
+    logger.debug(f"[{commit.id}] Done testing")
+
+    logger.debug(f"[{commit.id}] Storing results")
+    if not await _store_results(
+        data_provider,
+        storage_provider,
+        commit,
+        test_cases,
+        test_results,
+        cfg,
+        base_dir,
+    ):
+        return
+    logger.debug(f"[{commit.id}] Commit processing done")
+
+
+async def _fail_commit(
+    data_provider: DataProvider,
+    commit: Commit,
+    cfg: Config,
+    base_dir: str,
+    message: str,
+) -> None:
+    """Log ``message``, mark the commit INTERNAL_ERROR and drop its work dir.
+
+    The directory is only removed when ``cleanup_on_error`` is configured, so
+    a failure can be inspected afterwards by default.
+    """
+    logger = logging.getLogger(DEFAULT_LOGGER)
+    logger.exception(f"[{commit.id}] {message}")
+    commit.status = Commit.STATUS_INTERNAL_ERROR
+    await data_provider.update_commit(commit)
+    if bool(cfg.cleanup_on_error):
+        cleanup_tests(base_dir)
+
+
+async def _prepare_work_dir(
+    data_provider: DataProvider,
+    commit: Commit,
+    cfg: Config,
+    base_dir: str,
+) -> bool:
+    """Recreate the work directory; ``False`` when the commit was failed.
+
+    The cleanup runs BEFORE any prefetch download starts, so it can never
+    delete a file the prefetch just wrote.
+    """
     try:
         cleanup_tests(base_dir)
         os.makedirs(base_dir, DEFAULT_MKDIR_PERMISSIONS)
-    except Exception:
-        logger.exception(f"[{commit.id}] Failed to prepare runs")
+    except Exception:  # noqa: BLE001
         commit.reset()
-        commit.status = Commit.STATUS_INTERNAL_ERROR
-        await data_provider.update_commit(commit)
-        if bool(cfg.cleanup_on_error):
-            cleanup_tests(base_dir)
-        return
+        await _fail_commit(
+            data_provider, commit, cfg, base_dir, "Failed to prepare runs"
+        )
+        return False
+    return True
 
-    # ---- Prefetch phase: overlap the independent IO ------------------------
-    #
-    # Three independent operations start together:
-    #   * fetch_test_cases(commit)            - DB read
-    #   * delete_commit_test_results(commit)  - DB write
-    #   * the commit source file download     - S3, in a worker thread
-    #
-    # Ordering guarantees:
-    #   * the DB pair is awaited first and commit.reset()/STATUS_PROCESSING is
-    #     written as soon as it completes: the poller re-enqueues every commit
-    #     it still sees as STATUS_IN_QUEUE, so a slow download would otherwise
-    #     leave the commit queued for the whole download time and several
-    #     workers would process copies of it (colliding on the same base_dir);
-    #   * delete_commit_test_results still finishes before the
-    #     STATUS_PROCESSING update: a crash between the two must not leave a
-    #     commit marked PROCESSING with stale results;
-    #   * the download's failure surfaces through the "prepare runs" error
-    #     path below.
-    async def fetch_commit_file() -> None:
-        await download_commit_file(storage_provider, commit, base_dir)
 
-    # The download runs concurrently with the DB pair; its outcome is
-    # awaited after the STATUS_PROCESSING write (see above).
-    download_task = asyncio.create_task(fetch_commit_file())
+async def _prefetch_commit_data(
+    data_provider: DataProvider,
+    storage_provider: StorageProvider,
+    commit: Commit,
+    cfg: Config,
+    base_dir: str,
+) -> tuple[list[TestCase], asyncio.Task[None]] | None:
+    """Prefetch everything the container phase needs, overlapping the IO.
+
+    Three independent operations start together: fetching the test cases (DB
+    read), deleting stale results (DB write) and downloading the commit source
+    file (S3, in a worker thread).
+
+    Ordering guarantees:
+      * the DB pair is awaited first and commit.reset()/STATUS_PROCESSING is
+        written as soon as it completes: the poller re-enqueues every commit
+        it still sees as STATUS_IN_QUEUE, so a slow download would otherwise
+        leave the commit queued for the whole download time and several
+        consumers would process copies of it (colliding on the same base_dir);
+      * delete_commit_test_results still finishes before the STATUS_PROCESSING
+        update: a crash between the two must not leave a commit marked
+        PROCESSING with stale results;
+      * a download failure is handed back through the task for the caller's
+        "prepare runs" error path.
+
+    Returns the fetched test cases and the in-flight download task, or
+    ``None`` when the commit was marked INTERNAL_ERROR and must not be
+    processed further.
+    """
+    logger = logging.getLogger(DEFAULT_LOGGER)
+
+    download_task = asyncio.create_task(
+        download_commit_file(storage_provider, commit, base_dir)
+    )
     # Every path below awaits (or cancels) this task; the done callback only
     # guarantees the outcome is retrieved on the paths that never do (e.g.
-    # process_commit cancelled mid-prefetch), avoiding 'exception was never
+    # this coroutine cancelled mid-prefetch), avoiding 'exception was never
     # retrieved' warnings.
     download_task.add_done_callback(_mark_task_done)
 
@@ -743,7 +844,7 @@ async def process_commit(
             await data_provider.update_commit(commit)
             if bool(cfg.cleanup_on_error):
                 cleanup_tests(base_dir)
-            return
+            return None
         # A non-Exception BaseException (e.g. CancelledError) must never be
         # treated as a provider failure: propagate it unchanged.
         _ = download_task.cancel()
@@ -752,8 +853,7 @@ async def process_commit(
     if delete_error is not None:
         # Wait for the in-flight download so a later retry's cleanup cannot
         # race its worker thread, then propagate exactly like the sequential
-        # version (which had no try/except here: the commit stays in the
-        # queue and is retried).
+        # version (the commit stays in the queue and is retried).
         _ = await _await_task(download_task)
         raise delete_error
 
@@ -762,11 +862,35 @@ async def process_commit(
     commit.compilation_started_time = datetime.datetime.now(tz=datetime.UTC)
     await data_provider.update_commit(commit)
 
-    logger.debug(f"[{commit.id}] Preparing to run tests")
+    return test_cases, download_task
+
+
+async def _prepare_run_files(
+    data_provider: DataProvider,
+    storage_provider: StorageProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    cfg: Config,
+    base_dir: str,
+    download_task: asyncio.Task[None],
+) -> bool:
+    """Finish the prefetched download and fetch the remaining input files.
+
+    The download failure surfaces here so it goes through the same
+    "Failed to prepare runs" error path as the other preparation steps.
+    Returns ``False`` when the commit was failed.
+    """
+    # Bound for the S3 downloads: mirror the per-consumer commit concurrency
+    # so a consumer never opens more simultaneous downloads than it has
+    # in-flight commits, capped at a sane small maximum (and never zero,
+    # which would deadlock every download).
+    concurrency = int(
+        str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
+    )
+    download_semaphore = asyncio.Semaphore(
+        max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
+    )
     try:
-        # The commit file was downloaded during the prefetch phase; surface a
-        # failure here so it goes through the original "prepare runs" error
-        # path (log + STATUS_INTERNAL_ERROR + cleanup).
         commit_file_error = await _await_task(download_task)
         if commit_file_error is not None:
             raise commit_file_error
@@ -777,29 +901,27 @@ async def process_commit(
         await copy_test_case_files(
             storage_provider, test_cases, base_dir, download_semaphore
         )
-    except Exception:
-        logger.exception(f"[{commit.id}] Failed to prepare runs")
-        commit.status = Commit.STATUS_INTERNAL_ERROR
-        await data_provider.update_commit(commit)
-        if bool(cfg.cleanup_on_error):
-            cleanup_tests(base_dir)
-        return
-
-    logger.debug(f"[{commit.id}] Running tests")
-    try:
-        test_results = await run_tests(
-            data_provider, storage_provider, commit, test_cases, base_dir, remote_dir
+    except Exception:  # noqa: BLE001
+        await _fail_commit(
+            data_provider, commit, cfg, base_dir, "Failed to prepare runs"
         )
-    except Exception:
-        logger.exception(f"[{commit.id}] Failed to run tests")
-        commit.status = Commit.STATUS_INTERNAL_ERROR
-        await data_provider.update_commit(commit)
-        if bool(cfg.cleanup_on_error):
-            cleanup_tests(base_dir)
-        return
-    logger.debug(f"[{commit.id}] Done testing")
+        return False
+    return True
 
-    logger.debug(f"[{commit.id}] Storing results")
+
+async def _store_results(
+    data_provider: DataProvider,
+    storage_provider: StorageProvider,
+    commit: Commit,
+    test_cases: list[TestCase],
+    test_results: list[TestCaseResult],
+    cfg: Config,
+    base_dir: str,
+) -> bool:
+    """Score the commit, persist its results and upload the output zip.
+
+    Returns ``False`` when the commit was failed.
+    """
     try:
         compute_score(commit, test_cases, test_results)
         await data_provider.update_commit(commit)
@@ -811,65 +933,117 @@ async def process_commit(
                 storage_provider.store_commit_output, commit, output_fname
             )
         cleanup_tests(base_dir)
-    except Exception:
-        logger.exception(
-            f"[{commit.id}] Could not save results, commit data might be inconsistent"
+    except Exception:  # noqa: BLE001
+        await _fail_commit(
+            data_provider,
+            commit,
+            cfg,
+            base_dir,
+            "Could not save results, commit data might be inconsistent",
         )
-        commit.status = Commit.STATUS_INTERNAL_ERROR
-        await data_provider.update_commit(commit)
-        if bool(cfg.cleanup_on_error):
-            cleanup_tests(base_dir)
-        return
-    logger.debug(f"[{commit.id}] Commit processing done")
+        return False
+    return True
+
+
+async def _claim_and_run(
+    data_provider: DataProvider,
+    commit: Commit,
+    cfg: Config | None,
+    semaphore: asyncio.Semaphore,
+    fatal: asyncio.Event,
+    logger: logging.Logger,
+) -> None:
+    """Claim ``commit`` and process it, releasing the slot afterwards.
+
+    The poller can enqueue the same commit more than once (a commit stays
+    STATUS_IN_QUEUE until a consumer takes it, e.g. while it waits in the
+    bounded task queue), so several consumers may pull copies of it. The
+    claim is a conditional UPDATE (IN_QUEUE -> PROCESSING) in the provider,
+    which is the only state shared across consumers: only the consumer whose
+    update wins processes the commit; the losers drop their copies.
+    """
+    try:
+        try:
+            claimed = await data_provider.claim_commit(commit)
+        except Exception as e:
+            # Claim failed (e.g. a database hiccup): the commit stays
+            # IN_QUEUE and the poller re-enqueues it later.
+            logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+            return
+
+        if not claimed:
+            logger.debug(f"Commit {commit.id} already taken; skipping")
+            return
+
+        try:
+            await process_commit(data_provider, commit, cfg)
+        except NON_RETRYABLE_EXCEPTIONS as e:
+            logger.warning(f"Caught non-retryable exception: {e}")
+            fatal.set()
+        except Exception as e:
+            logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+            # We still hold the claim: give the commit back so the poller
+            # can retry it.
+            try:
+                await data_provider.release_commit(commit)
+            except Exception:
+                logger.warning(
+                    f"Could not release commit {commit.id} back to the queue",
+                    exc_info=True,
+                )
+    finally:
+        semaphore.release()
 
 
 async def process_commits(
     data_provider: DataProvider,
-    commit_queue: mp_queues.JoinableQueue[Commit | None],
+    commit_queue: asyncio.Queue[Commit | None],
     cfg: Config | None = None,
+    manage_pool: bool = True,
 ) -> None:
-    """Worker main loop: pull commits from the queue and process them.
+    """Consumer main loop: pull commits from the queue and process them.
 
     Producer/consumer structure: a single loop pulls commits from the queue
-    and spawns one ``asyncio.create_task(process_commit(...))`` per commit. An
-    ``asyncio.Semaphore`` sized ``concurrency_per_worker`` bounds the number
-    of commits in flight inside this worker; the slot is acquired before the
-    task is spawned and released in the task's ``finally`` block, so a failing
-    commit can never leak a slot.
+    and spawns one task per commit, claimed and processed by
+    :func:`_claim_and_run`. An ``asyncio.Semaphore`` sized
+    ``concurrency_per_worker`` bounds the number of commits in flight inside
+    this consumer; the slot is acquired before the task is spawned and
+    released in the task's ``finally`` block, so a failing commit can never
+    leak a slot.
 
-    The poller may deliver the same commit more than once (it re-enqueues
-    every commit it still sees as STATUS_IN_QUEUE), so each pulled commit is
-    first claimed with an atomic conditional UPDATE in the provider: only the
-    worker whose claim wins actually processes it, duplicate copies are
-    skipped, and a claim is released back to IN_QUEUE after a retryable
-    failure.
-
-    ``queue.get`` runs in a thread with a bounded wait so the loop can notice
+    ``queue.get`` waits with a bounded timeout so the loop can notice
     failures of in-flight tasks. When the ``None`` stop hint arrives the loop
     stops pulling and drains every in-flight commit before exiting.
-    Non-retryable exceptions stop the worker (after the in-flight commits
-    finish); retryable ones are logged and skipped. The process database
-    connection pool is opened here (one pool per process) and closed when the
-    worker stops.
+    Non-retryable exceptions stop the consumer (after the in-flight commits
+    finish); retryable ones are logged and skipped.
+
+    The database connection pool is opened here when ``manage_pool`` is set
+    (the default) and closed when the consumer stops. Callers that share one
+    provider across several consumers (``rcc.main``) pass ``manage_pool=False``
+    and own the pool lifecycle themselves.
     """
-    # Set up logging for worker process
     logger = logging.getLogger(DEFAULT_LOGGER)
 
-    # Only add handlers if logger doesn't have any (worker processes don't inherit parent's handlers)
+    # In production the main process's handlers are inherited; add handlers
+    # only when running standalone (e.g. tests).
     if not logger.handlers:
         logger.setLevel(logging.DEBUG)
         console_handler = logging.StreamHandler(sys.stderr)
         console_fmt = logging.Formatter(
-            "[%(asctime)s] %(module)s:%(lineno)d: <%(process)d> %(message)s"
+            "[%(asctime)s] %(module)s:%(lineno)d: <%(taskName)s> %(message)s",
+            defaults={"taskName": "-"},
         )
         console_handler.setFormatter(console_fmt)
         logger.addHandler(console_handler)
 
-    logger.debug("Worker started")
+    logger.debug("Consumer started")
 
-    # Register configuration if provided
     if cfg is not None:
-        _ = from_dict(DEFAULT_CONFIG, cfg.get_dict())
+        # Helper functions in this module read the global registry
+        # (_get_config), so make sure the config in use is the registered
+        # one (it already is when main() built it).
+        if get_config(DEFAULT_CONFIG) is not cfg:
+            _ = from_dict(DEFAULT_CONFIG, cfg.get_dict())
     else:
         cfg = get_config(DEFAULT_CONFIG)
 
@@ -883,130 +1057,65 @@ async def process_commits(
             str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
         )
 
-    # exceptions that stop the worker
-    non_retryable_exceptions = (
-        KeyboardInterrupt,
-        MemoryError,
-        OSError,
-        SystemExit,
-        SystemError,
-    )
+    if manage_pool:
+        try:
+            await data_provider.open()
+        except Exception:
+            logger.exception("Failed to open database connection pool")
+            raise
 
-    try:
-        # Open this process's own connection pool (pools cannot be shared
-        # across processes, so every worker opens its own).
-        await data_provider.open()
-    except Exception:
-        logger.exception("Failed to open database connection pool")
-        raise
-
-    # Caps the number of commits processed concurrently by this worker.
     semaphore = asyncio.Semaphore(concurrency)
-    # Registry of in-flight commit tasks: drained before the worker exits.
     in_flight: set[asyncio.Task[None]] = set()
-    # Set when a commit raises a non-retryable exception: the pull loop stops
-    # spawning new work and exits after the in-flight commits are drained.
     fatal = asyncio.Event()
 
-    async def run_commit(commit: Commit) -> None:
-        try:
-            # Claim the commit atomically before processing it. The poller
-            # can enqueue the same commit more than once (a commit stays
-            # STATUS_IN_QUEUE until a worker takes it, e.g. while it waits in
-            # the bounded task queue), so several workers may pull copies of
-            # it. The claim is a conditional UPDATE (IN_QUEUE -> PROCESSING)
-            # in the provider, which is the only state shared across worker
-            # processes: only the worker whose update wins processes the
-            # commit; the losers drop their copies.
-            try:
-                claimed = await data_provider.claim_commit(commit)
-            except Exception as e:
-                # Could not claim (e.g. a database hiccup): leave the commit
-                # in the queue to be pulled again later.
-                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
-                return
-            if not claimed:
-                logger.debug(f"Commit {commit.id} already taken; skipping")
-                return
-            try:
-                await process_commit(data_provider, commit, cfg)
-            except non_retryable_exceptions as e:
-                logger.warning(f"Caught non-retryable exception: {e}")
-                fatal.set()
-            except Exception as e:
-                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
-                # We still hold the claim: give the commit back to the queue
-                # so the poller can retry it.
-                try:
-                    await data_provider.release_commit(commit)
-                except Exception:
-                    logger.warning(
-                        f"Could not release commit {commit.id} back to the queue",
-                        exc_info=True,
-                    )
-        finally:
-            # Always give the slot back, even when the commit failed.
-            semaphore.release()
-
     try:
-        with UninterruptibleContext():
-            while True:
-                if fatal.is_set():
+        while True:
+            if fatal.is_set():
+                break
+
+            try:
+                # Bounded wait: lets the loop observe `fatal` (set by an
+                # in-flight task) instead of blocking on an empty queue.
+                commit = await asyncio.wait_for(
+                    commit_queue.get(), timeout=QUEUE_GET_POLL_TIMEOUT
+                )
+            except TimeoutError:
+                continue
+            except NON_RETRYABLE_EXCEPTIONS as e:
+                logger.warning(f"Caught non-retryable exception: {e}")
+                break
+            except Exception as e:
+                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
+                continue
+
+            try:
+                if commit is None:
                     break
+
+                _ = await semaphore.acquire()
                 try:
-                    # Bounded wait: lets the loop observe `fatal` (set by an
-                    # in-flight task) instead of blocking on an empty queue.
-                    commit = await asyncio.to_thread(
-                        commit_queue.get, True, QUEUE_GET_POLL_TIMEOUT
+                    task = asyncio.create_task(
+                        _claim_and_run(
+                            data_provider, commit, cfg, semaphore, fatal, logger
+                        )
                     )
-                except queue.Empty:
-                    continue
-                except non_retryable_exceptions as e:
-                    logger.warning(f"Caught non-retryable exception: {e}")
-                    break
-                except Exception as e:
-                    logger.warning(f"Caught retryable exception: {e}", exc_info=True)
-                    continue
+                except BaseException:
+                    # Spawning failed: give the slot back immediately.
+                    semaphore.release()
+                    raise
 
-                try:
-                    if commit is None:
-                        # Stop hint: mark the empty task as done (finally
-                        # block) and drain the in-flight commits.
-                        break
-                    _ = await semaphore.acquire()
-                    try:
-                        task = asyncio.create_task(run_commit(commit))
-                    except BaseException:
-                        # Spawning failed: give the slot back immediately.
-                        semaphore.release()
-                        raise
-                    in_flight.add(task)
-                    task.add_done_callback(in_flight.discard)
-                except non_retryable_exceptions as e:
-                    logger.warning(f"Caught non-retryable exception: {e}")
-                    break
-                except Exception as e:
-                    logger.warning(f"Caught retryable exception: {e}", exc_info=True)
-                finally:
-                    commit_queue.task_done()
+                in_flight.add(task)
+                task.add_done_callback(in_flight.discard)
+            except NON_RETRYABLE_EXCEPTIONS as e:
+                logger.warning(f"Caught non-retryable exception: {e}")
+                break
+            except Exception as e:
+                logger.warning(f"Caught retryable exception: {e}", exc_info=True)
 
-            # Drain: wait for every in-flight commit before exiting.
-            if in_flight:
-                _ = await asyncio.gather(*in_flight)
+        if in_flight:
+            _ = await asyncio.gather(*in_flight)
     finally:
-        await data_provider.close()
+        if manage_pool:
+            await data_provider.close()
 
-    logger.debug("Worker stopped")
-
-
-def run_worker(
-    data_provider: DataProvider,
-    commit_queue: mp_queues.JoinableQueue[Commit | None],
-    cfg: Config | None = None,
-) -> None:
-    """Sync entry point for the worker ``multiprocessing.Process`` target.
-
-    Each worker process starts its own event loop (and, through it, its own
-    database connection pool).
-    """
-    asyncio.run(process_commits(data_provider, commit_queue, cfg))
+    logger.debug("Consumer stopped")

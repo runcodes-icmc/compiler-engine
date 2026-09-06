@@ -9,20 +9,16 @@ from typing import cast, override
 DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
 
-# Default number of worker processes spawned to process commits. The
+# Default number of consumers pulling commits off the task queue. The
 # workload is IO-bound (containers, S3, database), so sizing is deliberately
 # *not* tied to the CPU count: the real ceiling for in-flight work is how
 # many compilation containers the Docker host can run at once, not the
-# number of cores. Worker processes are also the expensive part of the
-# pipeline (each owns an event loop and a database connection pool), so
-# prefer raising the per-worker concurrency over spawning more processes.
+# number of cores.
 DEFAULT_NUM_WORKERS = 2
 
-# Default number of commits a single worker process may process concurrently.
-# Used as the fallback for JSON configuration files that do not define
-# ``concurrency_per_worker``. Together with `DEFAULT_NUM_WORKERS` this bounds
-# the total number of in-flight commits (workers x concurrency); the
-# practical ceiling is the Docker host capacity, not the CPU count.
+# Default number of commits a single consumer may process concurrently.
+# Used as the fallback for configuration files that do not define
+# ``concurrency_per_worker``.
 DEFAULT_CONCURRENCY_PER_WORKER = 4
 
 # How long (seconds) the poller suppresses re-enqueueing a commit it already
@@ -92,15 +88,6 @@ class Config:
 
     def __getattr__(self, name: str) -> object:
         return self.__config__[name]
-
-    @override
-    def __getstate__(self) -> dict[str, dict[str, object]]:
-        """Return state for pickling."""
-        return {"__config__": self.__config__}
-
-    def __setstate__(self, state: dict[str, dict[str, object]]) -> None:
-        """Restore state from pickling."""
-        self.__config__ = state["__config__"]
 
     @override
     def __repr__(self) -> str:
@@ -191,9 +178,9 @@ class EnvConfig(Config):
             "pool_timeout": float(os.environ.get("RUNCODES_DB_POOL_TIMEOUT", "30")),
         }
         # ``pool_max_size`` is deliberately *omitted* when the env var is
-        # unset: the Postgres provider derives the maximum from the
-        # per-process concurrency (concurrency + 2, clamped to at least
-        # ``pool_min_size``). An explicitly configured
+        # unset: the Postgres provider derives the maximum from the total
+        # number of in-flight commit slots (num_workers * concurrency + 2,
+        # clamped to at least ``pool_min_size``). An explicitly configured
         # ``RUNCODES_DB_POOL_MAX_SIZE`` always wins.
         pool_max_env = os.environ.get("RUNCODES_DB_POOL_MAX_SIZE")
         if pool_max_env is not None:
@@ -223,12 +210,9 @@ class EnvConfig(Config):
             "num_workers": _env_int(
                 "RUNCODES_COMPILER_NUM_WORKERS", DEFAULT_NUM_WORKERS
             ),
-            # Number of commits each worker process handles concurrently.
             "concurrency_per_worker": _env_int(
                 "RUNCODES_COMPILER_CONCURRENCY", DEFAULT_CONCURRENCY_PER_WORKER
             ),
-            # Seconds the poller waits before re-enqueueing a commit it
-            # already put on the task queue.
             "commit_enqueue_suppression": float(
                 os.environ.get(
                     "RUNCODES_COMPILER_ENQUEUE_SUPPRESSION",
