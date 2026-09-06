@@ -17,6 +17,14 @@ package = false
 
 [tool.basedpyright]
 pythonVersion = "3.14"
+# Pin the mode for both the CLI and the language server. Zed otherwise forces
+# `standard` (a less strict level than basedpyright's own default), which made
+# the editor check a different rule set than CLI.
+typeCheckingMode = "recommended"
+# The tests under src/rcc/tests import the public `rcc` package by its
+# absolute name, exactly as an external consumer would.
+# The imports are intentional, so disable the rule.
+reportImplicitRelativeImport = "none"
 exclude = [
     "src/rcc/tests/engine/known_issues/commits/**",
     ".venv/**",

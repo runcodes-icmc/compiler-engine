@@ -18,9 +18,12 @@ WORKDIR /app
 # Load dependencies into a virtualenv
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy
+
 COPY ./pyproject.toml /app/pyproject.toml
 COPY ./uv.lock /app/uv.lock
+
 RUN uv sync --frozen
+
 ENV PATH="/app/.venv/bin:$PATH"
 
 FROM build AS dist
