@@ -12,7 +12,7 @@ updates:
 
   # Dependencies are managed by uv (pyproject.toml + uv.lock);
   # the pip ecosystem handles uv lockfiles natively.
-  - package-ecosystem: "pip"
+  - package-ecosystem: "uv"
     directory: "/"
     schedule:
       interval: "weekly"
