@@ -1,6 +1,6 @@
 import asyncio
 
-from .rcc import main
+from rcc import main
 
 if __name__ == "__main__":
     try:
