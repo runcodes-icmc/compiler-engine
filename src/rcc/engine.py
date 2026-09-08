@@ -17,11 +17,12 @@ import requests
 
 from .cmp import number_cmp, text_cmp, text_cmp2
 from .config import (
-    DEFAULT_CONCURRENCY_PER_WORKER,
+    DEFAULT_CONCURRENCY,
     DEFAULT_CONFIG,
     DEFAULT_LOGGER,
     Config,
     from_dict,
+    get_concurrency,
     get_config,
 )
 from .languages import language_from_extension
@@ -53,9 +54,9 @@ QUEUE_GET_POLL_TIMEOUT = 1.0
 CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 
 # Upper bound for the number of concurrent S3 downloads in the prefetch phase.
-# The actual bound mirrors ``concurrency_per_worker`` (the number of commits a
-# worker processes at once), capped here so a single commit with many
-# exercise/test-case files cannot open an unbounded number of connections.
+# The actual bound mirrors the configured in-flight concurrency, capped here so
+# a single commit with many exercise/test-case files cannot open an unbounded
+# number of connections.
 PREFETCH_MAX_CONCURRENT_DOWNLOADS = 8
 
 # Exceptions that stop a consumer instead of failing just one commit.
@@ -311,8 +312,8 @@ class ContainerLogReader:
     distinguish "end of stream" from "no data yet". The thread terminates by
     itself when the generator ends; if a container hangs forever the thread
     stays blocked in the generator, but it is a daemon thread and the number
-    of stuck readers is bounded by the worker's per-commit concurrency limit,
-    so it can never block process exit.
+    of stuck readers is bounded by the consumer's concurrency limit, so it
+    can never block process exit.
 
     One queue item corresponds to exactly one chunk yielded by the generator
     (which the docker API delivers line by line), preserving the semantics of
@@ -880,15 +881,12 @@ async def _prepare_run_files(
     "Failed to prepare runs" error path as the other preparation steps.
     Returns ``False`` when the commit was failed.
     """
-    # Bound for the S3 downloads: mirror the per-consumer commit concurrency
-    # so a consumer never opens more simultaneous downloads than it has
-    # in-flight commits, capped at a sane small maximum (and never zero,
-    # which would deadlock every download).
-    concurrency = int(
-        str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
-    )
+    # Bound for the S3 downloads: mirror the in-flight commit concurrency so
+    # a consumer never opens more simultaneous downloads than it has in-flight
+    # commits, capped at a sane small maximum (and never zero, which would
+    # deadlock every download).
     download_semaphore = asyncio.Semaphore(
-        max(1, min(concurrency, PREFETCH_MAX_CONCURRENT_DOWNLOADS))
+        max(1, min(get_concurrency(cfg), PREFETCH_MAX_CONCURRENT_DOWNLOADS))
     )
     try:
         commit_file_error = await _await_task(download_task)
@@ -999,17 +997,15 @@ async def process_commits(
     data_provider: DataProvider,
     commit_queue: asyncio.Queue[Commit | None],
     cfg: Config | None = None,
-    manage_pool: bool = True,
 ) -> None:
-    """Consumer main loop: pull commits from the queue and process them.
+    """The consumer: pull commits from the queue and process them.
 
     Producer/consumer structure: a single loop pulls commits from the queue
     and spawns one task per commit, claimed and processed by
-    :func:`_claim_and_run`. An ``asyncio.Semaphore`` sized
-    ``concurrency_per_worker`` bounds the number of commits in flight inside
-    this consumer; the slot is acquired before the task is spawned and
-    released in the task's ``finally`` block, so a failing commit can never
-    leak a slot.
+    :func:`_claim_and_run`. An ``asyncio.Semaphore`` sized by the configured
+    in-flight concurrency bounds the number of commits being processed; the
+    slot is acquired before the task is spawned and released in the task's
+    ``finally`` block, so a failing commit can never leak a slot.
 
     ``queue.get`` waits with a bounded timeout so the loop can notice
     failures of in-flight tasks. When the ``None`` stop hint arrives the loop
@@ -1017,10 +1013,8 @@ async def process_commits(
     Non-retryable exceptions stop the consumer (after the in-flight commits
     finish); retryable ones are logged and skipped.
 
-    The database connection pool is opened here when ``manage_pool`` is set
-    (the default) and closed when the consumer stops. Callers that share one
-    provider across several consumers (``rcc.main``) pass ``manage_pool=False``
-    and own the pool lifecycle themselves.
+    The connection pool is opened here before the pull loop starts and closed
+    when the consumer exits.
     """
     logger = logging.getLogger(DEFAULT_LOGGER)
 
@@ -1051,18 +1045,15 @@ async def process_commits(
         # No configuration was passed and none is registered: fall back to
         # the default concurrency (process_commit() would fail on the missing
         # configuration anyway).
-        concurrency = DEFAULT_CONCURRENCY_PER_WORKER
+        concurrency = DEFAULT_CONCURRENCY
     else:
-        concurrency = int(
-            str(cfg.get("concurrency_per_worker", DEFAULT_CONCURRENCY_PER_WORKER))
-        )
+        concurrency = get_concurrency(cfg)
 
-    if manage_pool:
-        try:
-            await data_provider.open()
-        except Exception:
-            logger.exception("Failed to open database connection pool")
-            raise
+    try:
+        await data_provider.open()
+    except Exception:
+        logger.exception("Failed to open database connection pool")
+        raise
 
     semaphore = asyncio.Semaphore(concurrency)
     in_flight: set[asyncio.Task[None]] = set()
@@ -1115,7 +1106,6 @@ async def process_commits(
         if in_flight:
             _ = await asyncio.gather(*in_flight)
     finally:
-        if manage_pool:
-            await data_provider.close()
+        await data_provider.close()
 
     logger.debug("Consumer stopped")

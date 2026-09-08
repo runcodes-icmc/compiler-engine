@@ -6,7 +6,7 @@ import psycopg
 import psycopg.conninfo
 from psycopg_pool import AsyncConnectionPool
 
-from ...config import Config, total_slots
+from ...config import Config, get_concurrency
 from ...languages import language_from_extension
 from ...model import Commit, TestCase, TestCaseResult
 from .data_provider import DataProvider
@@ -42,14 +42,14 @@ class Postgres(DataProvider):
         # bursts (one transaction per provider call), so one connection per
         # in-flight commit is enough for the steady state. When
         # ``pool_max_size`` is not configured explicitly it is derived from
-        # the total number of commit slots as ``num_workers * concurrency + 2``
-        # (clamped to at least ``pool_min_size``); the +2 margin covers
-        # transient overlap between a finishing commit and the next one
-        # starting. An explicit ``pool_max_size`` always wins.
+        # the in-flight concurrency as ``concurrency + 2`` (clamped to at
+        # least ``pool_min_size``); the +2 margin covers transient overlap
+        # between a finishing commit and the next one starting. An explicit
+        # ``pool_max_size`` always wins.
         self._pool_min_size = int(str(db.get("pool_min_size", 1)))
         explicit_max_size = db.get("pool_max_size")
         if explicit_max_size is None:
-            self._pool_max_size = max(total_slots(cfg) + 2, self._pool_min_size)
+            self._pool_max_size = max(get_concurrency(cfg) + 2, self._pool_min_size)
         else:
             self._pool_max_size = int(str(explicit_max_size))
         self._pool_timeout = float(str(db.get("pool_timeout", 30.0)))
@@ -62,7 +62,7 @@ class Postgres(DataProvider):
 
     @property
     def pool_max_size(self) -> int:
-        """Configured maximum pool size (derived from the total slots if unset)."""
+        """Configured maximum pool size (derived from concurrency if unset)."""
         return self._pool_max_size
 
     @property

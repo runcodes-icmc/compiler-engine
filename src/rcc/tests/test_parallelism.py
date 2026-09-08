@@ -60,7 +60,7 @@ def make_cfg(concurrency: int, exec_dir: str | None = None) -> rcc.config.Config
     return rcc.config.Config(
         {
             "provider": {"data": "postgres", "storage": "s3"},
-            "concurrency_per_worker": concurrency,
+            "concurrency": concurrency,
             "exec_dir": exec_dir,
             "exec_dir_remote": exec_dir,
             "src_dir": "src",
@@ -537,21 +537,25 @@ CONSUMER_COMMIT_SECONDS = 0.3
 
 
 async def fake_consumer(
-    _data_provider: DataProvider,
+    data_provider: DataProvider,
     task_queue: asyncio.Queue[Commit | None],
     _cfg: rcc.config.Config,
-    manage_pool: bool = True,  # pyright: ignore[reportUnusedParameter]
 ) -> None:
     """Stand-in for ``rcc.engine.process_commits`` as a consumer task.
 
-    Mirrors the real consumer's pull semantics: one item per loop turn,
-    sleeping to simulate slow work, and stopping on the None hint.
+    Mirrors the real consumer: opens the pool, pulls one item per loop turn
+    (sleeping to simulate slow work), stops on the None hint and closes the
+    pool on the way out.
     """
-    while True:
-        item = await task_queue.get()
-        if item is None:
-            return
-        await asyncio.sleep(CONSUMER_COMMIT_SECONDS)
+    await data_provider.open()
+    try:
+        while True:
+            item = await task_queue.get()
+            if item is None:
+                return
+            await asyncio.sleep(CONSUMER_COMMIT_SECONDS)
+    finally:
+        await data_provider.close()
 
 
 class PollingProvider(rcc.provider.data.DataProvider):
@@ -629,13 +633,13 @@ class RepeatingProvider(rcc.provider.data.DataProvider):
 
 
 class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
-    def test_queue_maxsize_is_two_times_total_slots(self) -> None:
-        cfg = rcc.config.Config({"num_workers": 3, "concurrency_per_worker": 4})
-        self.assertEqual(rcc.task_queue_maxsize(cfg), 24)
+    def test_queue_maxsize_is_two_times_concurrency(self) -> None:
+        cfg = rcc.config.Config({"concurrency": 4})
+        self.assertEqual(rcc.task_queue_maxsize(cfg), 8)
 
     def test_queue_maxsize_falls_back_to_default_concurrency(self) -> None:
-        cfg = rcc.config.Config({"num_workers": 2})
-        expected = 2 * 2 * rcc.config.DEFAULT_CONCURRENCY_PER_WORKER
+        cfg = rcc.config.Config({})
+        expected = 2 * rcc.config.DEFAULT_CONCURRENCY
         self.assertEqual(rcc.task_queue_maxsize(cfg), expected)
 
     async def test_polling_loop_blocks_on_a_full_queue(self) -> None:
@@ -643,8 +647,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
         cfg = rcc.config.Config(
             {
                 "provider": {"data": "postgres", "storage": "s3"},
-                "num_workers": 1,
-                "concurrency_per_worker": 1,  # -> bounded queue of size 2
+                "concurrency": 1,  # -> bounded queue of size 2
                 "min_sleep_time": 0.01,
                 "max_sleep_time": 0.01,
                 "lock_file": "compiler.lock",
@@ -732,8 +735,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
         cfg = rcc.config.Config(
             {
                 "provider": {"data": "postgres", "storage": "s3"},
-                "num_workers": 1,
-                "concurrency_per_worker": 1,
+                "concurrency": 1,
                 "min_sleep_time": 0.02,
                 "max_sleep_time": 0.02,
                 "lock_file": "compiler.lock",
@@ -755,8 +757,7 @@ class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
         cfg = rcc.config.Config(
             {
                 "provider": {"data": "postgres", "storage": "s3"},
-                "num_workers": 1,
-                "concurrency_per_worker": 1,
+                "concurrency": 1,
                 "min_sleep_time": 0.03,
                 "max_sleep_time": 0.03,
                 "lock_file": "compiler.lock",

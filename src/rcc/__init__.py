@@ -69,33 +69,29 @@ def select_new_commits(
     return [commit for commit in commits if commit.id not in recently_enqueued]
 
 
-async def _stop_consumers(
-    engine_consumers: list[asyncio.Task[None]],
+async def _stop_consumer(
+    consumer: asyncio.Task[None] | None,
     task_queue: asyncio.Queue[Commit | None],
     logger: logging.Logger,
 ) -> None:
-    """Ask the consumers to stop and wait for them to finish.
+    """Ask the consumer to stop and wait for it to finish.
 
-    The ``None`` hints are put directly on the task queue: the queue is
-    bounded, so a full queue makes the puts wait until the consumers drain
-    it (which is exactly the graceful stop condition). A second interruption
-    aborts the wait and cancels every consumer.
+    The ``None`` hint is put directly on the task queue: the queue is bounded,
+    so a full queue makes the put wait until the consumer drains it (which is
+    exactly the graceful stop condition). A second interruption aborts the
+    wait and cancels the consumer.
     """
+    if consumer is None or consumer.done():
+        return
     try:
-        for consumer in engine_consumers:
-            if not consumer.done():
-                await task_queue.put(None)
-
-        # Wait for every consumer to finish draining its in-flight commits.
-        results = await asyncio.gather(*engine_consumers, return_exceptions=True)
-        for consumer, result in zip(engine_consumers, results, strict=True):
-            if isinstance(result, BaseException):
-                logger.error("Consumer failed during shutdown", exc_info=result)
+        await task_queue.put(None)
+        results = await asyncio.gather(consumer, return_exceptions=True)
+        if isinstance(results[0], BaseException):
+            logger.error("Consumer failed during shutdown", exc_info=results[0])
     except KeyboardInterrupt:
-        # Give up and cancel everything
+        # Give up and cancel it
         logger.info("Aborted")
-        for consumer in engine_consumers:
-            _ = consumer.cancel()
+        _ = consumer.cancel()
 
 
 def task_queue_maxsize(cfg: config.Config) -> int:
@@ -151,7 +147,7 @@ async def _poll_commits(
 
     Every commit still STATUS_IN_QUEUE is re-fetched on each cycle, so
     recently enqueued ids are suppressed (see :func:`select_new_commits`):
-    without this a commit waiting in the queue for a free consumer would be
+    without this a commit waiting in the queue for a free slot would be
     enqueued again and again. Consumer-side claiming already makes such
     duplicates harmless; this only avoids wasting queue capacity and claim
     round trips.
@@ -194,10 +190,8 @@ async def main() -> None:
 
     cfg, logger = _load_config()
 
-    num_workers, concurrency = config.parallelism_values(cfg)
-    logger.info(
-        f"Parallelism: consumers={num_workers}, concurrency={concurrency}, max_in_flight={config.total_slots(cfg)}"
-    )
+    concurrency = config.get_concurrency(cfg)
+    logger.info(f"Parallelism: concurrency={concurrency}")
 
     with util.SingletonContext(cast(str, cfg.lock_file)):
         logger.info("Started")
@@ -210,42 +204,33 @@ async def main() -> None:
         task_queue: asyncio.Queue[Commit | None] = asyncio.Queue(
             maxsize=task_queue_maxsize(cfg)
         )
-        engine_consumers: list[asyncio.Task[None]] = []
+        consumer: asyncio.Task[None] | None = None
 
         try:
-            # Open the single process-wide connection pool before the
-            # consumers start pulling, so their first claim round trips find
-            # it ready. Connections are established lazily, so a database
-            # that is not up yet does not crash the process: poll cycles
-            # simply fail and are retried.
-            await data_provider.open()
-
-            engine_consumers = [
-                asyncio.create_task(
-                    engine.process_commits(
-                        data_provider, task_queue, cfg, manage_pool=False
-                    ),
-                    name=f"consumer-{i}",
-                )
-                for i in range(cast(int, cfg.num_workers))
-            ]
+            # The consumer opens the connection pool itself before pulling,
+            # so its first claim round trip finds it ready. Connections are
+            # established lazily, so a database that is not up yet does not
+            # crash the process: poll cycles simply fail and are retried.
+            consumer = asyncio.create_task(
+                engine.process_commits(data_provider, task_queue, cfg),
+                name="consumer",
+            )
 
             await _poll_commits(data_provider, task_queue, cfg, logger)
         except KeyboardInterrupt:
             # Only possible for a second Ctrl-C while the first one is already
             # being handled (see the CancelledError branch below).
-            logger.info("Interrupted; waiting for consumers")
-            await _stop_consumers(engine_consumers, task_queue, logger)
+            logger.info("Interrupted; waiting for consumer")
+            await _stop_consumer(consumer, task_queue, logger)
         except asyncio.CancelledError:
             # asyncio.run() (Python >= 3.11) translates the first Ctrl-C into
             # cancellation of this task. Run the same graceful shutdown, then
             # re-raise so asyncio.run() turns the cancellation back into a
             # KeyboardInterrupt for the caller.
-            logger.info("Interrupted; waiting for consumers")
-            await _stop_consumers(engine_consumers, task_queue, logger)
+            logger.info("Interrupted; waiting for consumer")
+            await _stop_consumer(consumer, task_queue, logger)
             raise
         finally:
-            await data_provider.close()
             logger.info("Exited")
 
 
@@ -254,5 +239,5 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         # asyncio.run() re-raises KeyboardInterrupt after gracefully stopping
-        # the workers: nothing left to do.
+        # the consumer: nothing left to do.
         pass

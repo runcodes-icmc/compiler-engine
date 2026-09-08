@@ -32,8 +32,7 @@
     },
 
     "lock_file": "compiler.lock",
-    "num_workers": 2,
-    "concurrency_per_worker": 4,
+    "concurrency": 8,
     "commit_enqueue_suppression": 60,
 
     "min_sleep_time": 1,

@@ -200,7 +200,7 @@ def make_cfg(
     db.update(db_overrides)
     cfg: dict[str, object] = {"db": db}
     if concurrency is not None:
-        cfg["concurrency_per_worker"] = concurrency
+        cfg["concurrency"] = concurrency
     return rcc.config.Config(cfg)
 
 
@@ -295,9 +295,9 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         self.assertIn("dbname=runcodes", conninfo)
         self.assertIn("user=user", conninfo)
 
-    def test_pool_max_size_derived_from_total_slots(self) -> None:
+    def test_pool_max_size_derived_from_concurrency(self) -> None:
         provider = Postgres(make_cfg(concurrency=4))
-        self.assertEqual(provider.pool_max_size, 10)
+        self.assertEqual(provider.pool_max_size, 6)
 
     def test_pool_max_size_derived_value_clamped_to_min_size(self) -> None:
         provider = Postgres(make_cfg(concurrency=1, pool_min_size=5))
@@ -307,12 +307,11 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
         provider = Postgres(make_cfg(concurrency=4, pool_max_size=100))
         self.assertEqual(provider.pool_max_size, 100)
 
-    def test_pool_max_size_derivation_uses_default_parallelism(self) -> None:
+    def test_pool_max_size_derivation_uses_default_concurrency(self) -> None:
         provider = Postgres(make_cfg())
         self.assertEqual(
             provider.pool_max_size,
-            rcc.config.DEFAULT_NUM_WORKERS * rcc.config.DEFAULT_CONCURRENCY_PER_WORKER
-            + 2,
+            rcc.config.DEFAULT_CONCURRENCY + 2,
         )
 
     async def test_open_uses_derived_max_size_when_not_configured(self) -> None:
@@ -322,7 +321,7 @@ class TestPostgresPool(unittest.IsolatedAsyncioTestCase):
             provider = Postgres(make_cfg(concurrency=3))
             await provider.open()
         (pool,) = RecordingPool.instances
-        self.assertEqual(pool.kwargs["max_size"], 8)
+        self.assertEqual(pool.kwargs["max_size"], 5)
 
     async def test_open_is_idempotent(self) -> None:
         with mock.patch(

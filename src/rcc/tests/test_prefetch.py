@@ -57,7 +57,7 @@ def make_commit(commit_id: int = 1) -> Commit:
 def make_cfg(exec_dir: str, **overrides: object) -> rcc.config.Config:
     values: dict[str, object] = {
         "provider": {"data": "postgres", "storage": "s3"},
-        "concurrency_per_worker": 4,
+        "concurrency": 4,
         "exec_dir": exec_dir,
         "exec_dir_remote": exec_dir,
         "src_dir": "src",
@@ -353,7 +353,7 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
         provider = ExerciseFilesProvider([f"f{i}.c" for i in range(6)])
 
         with tempfile.TemporaryDirectory() as tmpdir:
-            cfg = make_cfg(tmpdir, concurrency_per_worker=2)
+            cfg = make_cfg(tmpdir, concurrency=2)
             commit = make_commit()
             with (
                 mock.patch.object(
@@ -363,7 +363,7 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
             ):
                 await rcc.engine.process_commit(provider, commit, cfg)
 
-        # Six independent downloads bounded by min(concurrency_per_worker,
+        # Six independent downloads bounded by min(concurrency,
         # PREFETCH_MAX_CONCURRENT_DOWNLOADS) = 2: they must overlap (more than
         # one at a time) and never exceed the bound. The single commit-file
         # download of the prefetch phase contributes at most max_active == 1.

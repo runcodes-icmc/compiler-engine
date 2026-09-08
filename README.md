@@ -13,40 +13,32 @@ The project's configuration is done through environment variables, which can be 
 
 ### Parallelism tuning
 
-The engine processes commits through two nested knobs:
+The engine runs a single consumer coroutine on its event loop, fed by a
+bounded task queue. One knob bounds the number of in-flight commits:
 
-- `RUNCODES_COMPILER_NUM_WORKERS` (default `2`): the number of consumer tasks
-  running on the engine's single event loop. Each consumer owns a share of
-  the concurrency below.
-- `RUNCODES_COMPILER_CONCURRENCY` (default `4`): the number of commits each
-  consumer processes concurrently.
+- `RUNCODES_COMPILER_CONCURRENCY` (default `8`): the number of commits the
+  consumer processes concurrently. This is also the total number of in-flight
+  commits.
 
-The total number of in-flight commits is the product of the two
-(`num_workers × concurrency`, default 2×4 = 8). The same values are read from
-JSON configuration files through the `num_workers` and `concurrency_per_worker`
-keys (see `config/rcc/config.json.example`).
+The same value is read from JSON configuration files through the `concurrency`
+key (see `config/rcc/config.json.example`).
 
 The workload is IO-bound (containers, S3, database), so sizing has nothing to
 do with the CPU count: the real ceiling is how many compilation containers
-the Docker host can run at once, plus available RAM. The whole engine runs in
-a single process (threads would not add parallelism for IO-bound work), so
-when the host can take more in-flight work, raise the concurrency and/or the
-number of consumer tasks.
+the Docker host can run at once, plus available RAM.
 
-On startup the engine validates the values (`num_workers >= 1`,
-`concurrency >= 1`, and a bounded task queue at least as large as the total
-number of in-flight slots), refuses to start on nonsensical values and logs
-one line with the effective parallelism (e.g. `workers=2, concurrency=4,
-max_in_flight=8`).
+On startup the engine validates the value (`concurrency >= 1`), refuses to
+start on a nonsensical value and logs one line with the effective parallelism
+(e.g. `Parallelism: concurrency=8`).
 
 ### Database pool sizing
 
 The engine owns a single `psycopg_pool` connection pool, tuned through:
 
 - `RUNCODES_DB_POOL_MIN_SIZE` (default `1`)
-- `RUNCODES_DB_POOL_MAX_SIZE` — when not set, derived from the total
-  in-flight slots as `num_workers × concurrency + 2` (clamped to at least the
-  minimum size); an explicitly configured value always wins
+- `RUNCODES_DB_POOL_MAX_SIZE` — when not set, derived from the in-flight
+  concurrency as `concurrency + 2` (clamped to at least the minimum size); an
+  explicitly configured value always wins
 - `RUNCODES_DB_POOL_TIMEOUT` (default `30` seconds)
 
 One pooled connection per in-flight commit is enough because a commit only
