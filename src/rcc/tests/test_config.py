@@ -2,11 +2,13 @@
 Tests for configuration defaults, validation and helpers.
 
 No external services required: these tests exercise ``EnvConfig`` (with a
-scrubbed environment), ``get_concurrency``, ``queue_maxsize`` and ``validate``
-directly.
+scrubbed environment), the config builders (``from_env``/``from_json``),
+``get_concurrency``, ``queue_maxsize`` and ``validate`` directly.
 """
 
+import json
 import os
+import tempfile
 import unittest
 from typing import cast, override
 from unittest import mock
@@ -127,6 +129,22 @@ class TestQueueMaxsize(unittest.TestCase):
             self.assertGreaterEqual(
                 rcc.config.queue_maxsize(cfg), rcc.config.get_concurrency(cfg)
             )
+
+
+class TestConfigBuilders(unittest.TestCase):
+    def test_from_env_builds_config_from_environment(self) -> None:
+        with mock.patch.dict(
+            os.environ, {"RUNCODES_COMPILER_CONCURRENCY": "6"}, clear=True
+        ):
+            cfg = rcc.config.from_env()
+        self.assertEqual(rcc.config.get_concurrency(cfg), 6)
+
+    def test_from_json_builds_config_from_file(self) -> None:
+        with tempfile.NamedTemporaryFile("w", suffix=".json") as config_file:
+            _ = config_file.write(json.dumps({"concurrency": 3}))
+            config_file.flush()
+            cfg = rcc.config.from_json(config_file.name)
+        self.assertEqual(rcc.config.get_concurrency(cfg), 3)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,8 @@ import rcc.provider.storage
 from rcc.languages import Language
 from rcc.model import Commit, TestCase, TestCaseResult
 
+from .. import TEST_CONFIG
+
 
 class TestCaseMetadata(TypedDict):
     id: int
@@ -284,6 +286,7 @@ class TestEngineKnownIssues(unittest.TestCase):
         for metadata in commit_metadata:
             commit = build_commit(metadata)
             with self.subTest(name=commit.user_email):
-                cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-                asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
+                asyncio.run(
+                    rcc.engine.process_commit(self.data_prov, commit, TEST_CONFIG)
+                )
                 self.assertEqual(commit.status, metadata["expected_status"])

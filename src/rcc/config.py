@@ -6,7 +6,6 @@ import json
 import os
 from typing import cast, override
 
-DEFAULT_CONFIG = "run.codes"
 DEFAULT_LOGGER = "run.codes"
 
 # Default number of commits the consumer may process concurrently — the
@@ -39,9 +38,6 @@ def _env_int(name: str, default: int) -> int:
         return int(raw)
     except ValueError:
         raise ConfigError(f"{name} must be an integer, got {raw!r}") from None
-
-
-__config__: dict[str, Config] = {}
 
 
 class Config:
@@ -214,32 +210,16 @@ class EnvConfig(Config):
         super().__init__(env_configs)
 
 
-def get_config(name: str) -> Config | None:
-    """Return the `Config` registered under the given name, or `None`."""
-    return __config__.get(name)
-
-
-def from_json(name: str, fname: str) -> Config:
-    """Register a new `Config` with the given name, read from a JSON file."""
+def from_json(fname: str) -> Config:
+    """Build a `Config` from a JSON file."""
     with open(fname, "r") as config_file:
         config_dict = cast(dict[str, object], json.load(config_file))
-        c = Config(config_dict)
-        __config__[name] = c
-        return c
+        return Config(config_dict)
 
 
-def from_dict(name: str, d: dict[str, object]) -> Config:
-    """Register a new `Config` with the given name, built from a regular `dict`."""
-    c = Config(d)
-    __config__[name] = c
-    return c
-
-
-def from_env(name: str) -> Config:
-    """Register a new `Config` with the given name, built from environment variables."""
-    c = EnvConfig()
-    __config__[name] = c
-    return c
+def from_env() -> Config:
+    """Build a `Config` from environment variables (with defaults)."""
+    return EnvConfig()
 
 
 def _check_dict(d: object) -> None:

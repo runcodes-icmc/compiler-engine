@@ -6,12 +6,9 @@ import datetime
 import fcntl
 import os
 import time
-import zipfile
 from collections.abc import Callable, Iterable
 from types import TracebackType
 from typing import Self, TextIO
-
-from .languages import language_from_extension
 
 
 class SingletonContext:
@@ -106,54 +103,6 @@ class Sleeper:
 def count_if[T](pred: Callable[[T], object], iterable: Iterable[T]) -> int:
     """Returns the number of elements of `iterable` for which `pred` holds."""
     return sum(1 for x in iterable if pred(x))
-
-
-def standardize_extension(ext_raw: str) -> str | None:
-    """
-    This function transforms similar extensions into a single name. These are
-    not supposed to be 'correct' extensions, but to reference files from the
-    same language in a unified way.
-    """
-    ext = ext_raw.split(".")[-1]
-
-    if ext == "zip":
-        return ext
-
-    language = language_from_extension(ext)
-    if language is not None:
-        return language.standard_extension
-
-    return None
-
-
-def deduce_language(zip_file: zipfile.ZipFile) -> str:
-    counts: dict[str, int] = {}
-    fnames = zip_file.namelist()
-    for fname in fnames:
-        _, ext = os.path.splitext(fname)
-        if ext == "":
-            continue
-        ext = standardize_extension(ext[1:])
-        if ext is None:
-            continue
-        counts[ext] = 1 + counts.get(ext, 0)
-    if len(counts) == 0:
-        raise ValueError("No files with extensions were found")
-    language = max(counts, key=lambda x: counts[x])
-    return language
-
-
-def is_compilable(ext: str | None) -> bool:
-    """
-    Given some extension (as returned by `standardize_extension()`), is it of
-    compilable source code?
-    """
-    if ext is None:
-        return False
-    language = language_from_extension(ext)
-    if language is not None:
-        return language.compilable
-    return False
 
 
 def from_datetime_to_timestamp(dt: datetime.datetime) -> int:

@@ -39,7 +39,8 @@ class Commit:
     is_make: bool
     fname: str | None
     language: Language | None
-    # Derived while processing (see rcc.engine.set_extension / copy_source_files).
+    # Derived while processing (see rcc.engine.common.set_extension /
+    # rcc.engine.workspace.copy_source_files).
     extension: str | None
     is_compilable: bool
     # Free-form metadata attached by some tests.

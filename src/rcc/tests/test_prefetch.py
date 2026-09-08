@@ -71,10 +71,7 @@ def make_cfg(exec_dir: str, **overrides: object) -> rcc.config.Config:
         "cleanup_on_error": True,
     }
     values.update(overrides)
-    cfg = rcc.config.Config(values)
-    # process_commit()'s helper functions read the registered default config.
-    _ = rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, values)
-    return cfg
+    return rcc.config.Config(values)
 
 
 class NoopStorage:
@@ -253,6 +250,7 @@ class ExerciseFilesProvider(RecordingProvider):
 class TestPrefetch(unittest.IsolatedAsyncioTestCase):
     async def _fake_run_tests(
         self,
+        _cfg: rcc.config.Config,
         _data_provider: DataProvider,
         _storage_provider: StorageProvider,
         _commit: Commit,
@@ -281,7 +279,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
             ):
                 await asyncio.wait_for(
                     rcc.engine.process_commit(provider, commit, cfg), timeout=5
@@ -328,7 +328,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
             ):
                 task = asyncio.create_task(
                     rcc.engine.process_commit(provider, commit, cfg)
@@ -359,7 +361,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
             ):
                 await rcc.engine.process_commit(provider, commit, cfg)
 
@@ -387,7 +391,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
                 self.assertLogs(rcc.config.DEFAULT_LOGGER, level="ERROR") as logs,
             ):
                 await rcc.engine.process_commit(provider, commit, cfg)
@@ -415,7 +421,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
                 self.assertLogs(rcc.config.DEFAULT_LOGGER, level="ERROR") as logs,
             ):
                 await rcc.engine.process_commit(provider, commit, cfg)
@@ -440,7 +448,9 @@ class TestPrefetch(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", self._fake_run_tests),
+                mock.patch.object(
+                    rcc.engine.pipeline, "run_tests", self._fake_run_tests
+                ),
                 self.assertRaisesRegex(RuntimeError, "delete failed"),
             ):
                 await rcc.engine.process_commit(provider, commit, cfg)

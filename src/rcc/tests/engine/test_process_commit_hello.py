@@ -13,6 +13,8 @@ import rcc.provider.storage
 from rcc.languages import Language
 from rcc.model import Commit, TestCase, TestCaseResult
 
+from . import TEST_CONFIG
+
 hello_c_src = """
 #include <stdio.h>
 
@@ -247,17 +249,15 @@ class TestEngineHello(unittest.TestCase):
     data_prov: MockDataProvider = MockDataProvider()
     storage_from_config: object = rcc.provider.storage.from_config
     handler: logging.StreamHandler[TextIO] = logging.StreamHandler(sys.stderr)
+    cfg: rcc.config.Config = rcc.config.Config(TEST_CONFIG.get_dict())
 
     @override
     def setUp(self) -> None:
         self.data_prov = MockDataProvider()
         self.storage_from_config = rcc.provider.storage.from_config
         rcc.provider.storage.from_config = MockStorageProvider
-        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-        if cfg is None:
-            # Register a default configuration for tests
-            cfg = rcc.config.from_dict(rcc.config.DEFAULT_CONFIG, {})
-        cfg.update({"max_output_file_size": 1024 * 1024})
+        self.cfg = rcc.config.Config(TEST_CONFIG.get_dict())
+        self.cfg.update({"max_output_file_size": 1024 * 1024})
         self.handler = logging.StreamHandler(sys.stderr)
         self.handler.setLevel(logging.DEBUG)
         self.handler.setFormatter(
@@ -274,8 +274,7 @@ class TestEngineHello(unittest.TestCase):
         logger.removeHandler(self.handler)
 
     def run_test_process_commit(self, commit: Commit) -> None:
-        cfg = rcc.config.get_config(rcc.config.DEFAULT_CONFIG)
-        asyncio.run(rcc.engine.process_commit(self.data_prov, commit, cfg))
+        asyncio.run(rcc.engine.process_commit(self.data_prov, commit, self.cfg))
         self.assertEqual(commit.status, Commit.STATUS_COMPLETED)
         self.assertEqual(commit.score, 10)
         self.assertEqual(commit.corrects, 1)

@@ -21,6 +21,7 @@ from unittest import mock
 import rcc
 import rcc.config
 import rcc.engine
+import rcc.engine.poller
 import rcc.provider.data
 import rcc.provider.storage
 import rcc.util
@@ -269,7 +270,9 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         for commit in commits:
             task_queue.put_nowait(commit)
         task_queue.put_nowait(None)
-        with mock.patch.object(rcc.engine, "process_commit", fake_process_commit):
+        with mock.patch.object(
+            rcc.engine.consumer, "process_commit", fake_process_commit
+        ):
             await rcc.engine.process_commits(provider, task_queue, cfg)
         return provider, task_queue
 
@@ -400,7 +403,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         for commit in (make_commit(1), make_commit(1), make_commit(2)):
             task_queue.put_nowait(commit)
         task_queue.put_nowait(None)
-        with mock.patch.object(rcc.engine, "process_commit", fake):
+        with mock.patch.object(rcc.engine.consumer, "process_commit", fake):
             await rcc.engine.process_commits(provider, task_queue, cfg)
 
         # The duplicate copy of commit 1 was claimed and skipped.
@@ -424,7 +427,7 @@ class TestWorkerConcurrency(unittest.IsolatedAsyncioTestCase):
         task_queue: asyncio.Queue[Commit | None] = asyncio.Queue()
         task_queue.put_nowait(make_commit(1))
         task_queue.put_nowait(None)
-        with mock.patch.object(rcc.engine, "process_commit", fake):
+        with mock.patch.object(rcc.engine.consumer, "process_commit", fake):
             await rcc.engine.process_commits(provider, task_queue, cfg)
 
         self.assertEqual(provider.claim_count, 1)
@@ -441,6 +444,7 @@ class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
         max_active = 0
 
         async def fake_run_tests(
+            _cfg: rcc.config.Config,
             _data_provider: DataProvider,
             _storage_provider: object,
             _commit: Commit,
@@ -471,7 +475,7 @@ class TestProcessCommitIntegration(unittest.IsolatedAsyncioTestCase):
                 mock.patch.object(
                     rcc.provider.storage, "from_config", return_value=storage
                 ),
-                mock.patch.object(rcc.engine, "run_tests", fake_run_tests),
+                mock.patch.object(rcc.engine.pipeline, "run_tests", fake_run_tests),
             ):
                 await rcc.engine.process_commits(provider, task_queue, cfg)
 
@@ -633,15 +637,6 @@ class RepeatingProvider(rcc.provider.data.DataProvider):
 
 
 class TestMainBackpressure(unittest.IsolatedAsyncioTestCase):
-    def test_queue_maxsize_is_two_times_concurrency(self) -> None:
-        cfg = rcc.config.Config({"concurrency": 4})
-        self.assertEqual(rcc.task_queue_maxsize(cfg), 8)
-
-    def test_queue_maxsize_falls_back_to_default_concurrency(self) -> None:
-        cfg = rcc.config.Config({})
-        expected = 2 * rcc.config.DEFAULT_CONCURRENCY
-        self.assertEqual(rcc.task_queue_maxsize(cfg), expected)
-
     async def test_polling_loop_blocks_on_a_full_queue(self) -> None:
         provider = PollingProvider([make_commit(i) for i in range(5)])
         cfg = rcc.config.Config(
@@ -783,27 +778,29 @@ class TestSelectNewCommits(unittest.TestCase):
         c1, c2 = make_commit(1), make_commit(2)
 
         # First appearance: both are new.
-        new = rcc.select_new_commits([c1, c2], tracker, 60)
+        new = rcc.engine.poller.select_new_commits([c1, c2], tracker, 60)
         self.assertEqual([c.id for c in new], [1, 2])
         tracker[1] = time.monotonic()
         tracker[2] = time.monotonic()
 
         # Still IN_QUEUE within the window: suppressed.
-        self.assertEqual(rcc.select_new_commits([c1, c2], tracker, 60), [])
+        self.assertEqual(
+            rcc.engine.poller.select_new_commits([c1, c2], tracker, 60), []
+        )
 
         # A claimed commit leaves the fetch: its entry is pruned...
-        self.assertEqual(rcc.select_new_commits([c1], tracker, 60), [])
+        self.assertEqual(rcc.engine.poller.select_new_commits([c1], tracker, 60), [])
         self.assertEqual(set(tracker), {1})
 
         # ...so a commit released back to IN_QUEUE is re-enqueued at once.
-        new = rcc.select_new_commits([c2], tracker, 60)
+        new = rcc.engine.poller.select_new_commits([c2], tracker, 60)
         self.assertEqual([c.id for c in new], [2])
         tracker[2] = time.monotonic()
 
         # A commit still IN_QUEUE past the window is re-enqueued (its worker
         # may have died between pulling and claiming it).
         tracker[1] = time.monotonic() - 61
-        new = rcc.select_new_commits([c1, c2], tracker, 60)
+        new = rcc.engine.poller.select_new_commits([c1, c2], tracker, 60)
         self.assertEqual([c.id for c in new], [1])
         self.assertNotIn(1, tracker)
         self.assertIn(2, tracker)

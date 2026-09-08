@@ -1,7 +1,9 @@
 import rcc.config
 
-_ = rcc.config.from_dict(
-    rcc.config.DEFAULT_CONFIG,
+# Configuration for the docker-backed engine tests. The engine now takes its
+# config explicitly, so tests build their own copy from this instead of
+# relying on a global registry.
+TEST_CONFIG = rcc.config.Config(
     {
         "exec_dir": "/var/runcodes/runs",
         "exec_dir_remote": "/var/runcodes/runs",
