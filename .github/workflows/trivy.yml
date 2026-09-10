@@ -1,0 +1,89 @@
+name: Trivy Security Scan
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  schedule:
+    # Weekly, Mondays at 03:00 UTC — catches new CVEs even without code changes.
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: trivy-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  repo-scan:
+    name: Repository scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Required to upload SARIF results to the Security tab.
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Run Trivy on the repository
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          trivy-config: trivy.yaml
+          # Report-only: findings are uploaded to the Security tab instead of
+          # failing the workflow (see trivy.yaml for the blocking defaults).
+          exit-code: "0"
+          # Keep the vulnerability DB cache outside the scanned tree.
+          cache-dir: /tmp/trivy-cache
+          format: sarif
+          output: trivy-repo-results.sarif
+
+      - name: Upload results to the Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        # Uploads are not allowed for PRs from forks, so skip them there.
+        if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)
+        with:
+          sarif_file: trivy-repo-results.sarif
+          category: trivy-repo
+
+  image-scan:
+    name: Container image scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Plain `docker build` (no buildx cache) so the scan also works for
+      # pull requests from forks, which cannot write the Actions cache.
+      - name: Build image for scanning
+        run: docker build -t compiler-engine:${{ github.sha }} .
+
+      - name: Run Trivy on the image
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: compiler-engine:${{ github.sha }}
+          trivy-config: trivy.yaml
+          # Focus the merge gate on the shipped artifact.
+          scanners: vuln,secret
+          # Keep the CRITICAL/HIGH severity filter from trivy.yaml for the
+          # SARIF report so the merge gate is not bypassed.
+          limit-severities-for-sarif: "true"
+          cache-dir: /tmp/trivy-cache
+          format: sarif
+          output: trivy-image-results.sarif
+
+      - name: Upload results to the Security tab
+        uses: github/codeql-action/upload-sarif@v4
+        if: always() && (github.event_name != 'pull_request' || !github.event.pull_request.head.repo.fork)
+        with:
+          sarif_file: trivy-image-results.sarif
+          category: trivy-image

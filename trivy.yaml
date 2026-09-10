@@ -1,0 +1,34 @@
+# Trivy configuration shared by local runs and GitHub Actions.
+# Reference: https://aquasecurity.github.io/trivy/latest/docs/references/configuration/config-file/
+#
+# Precedence in the CI action: action inputs > environment variables >
+# this file > Trivy defaults.
+
+# Fail with a non-zero exit code when findings at the configured severities
+# are found. The repository scan in CI overrides this to 0 (report-only);
+# the container image scan uses it as its merge gate.
+exit-code: 1
+
+# Only findings at these severities are reported and can fail the scan.
+severity:
+  - CRITICAL
+  - HIGH
+
+# Overall scan timeout.
+timeout: 10m
+
+# Known false positives and accepted risks are listed in `.trivyignore` at
+# the repository root.
+ignorefile: .trivyignore
+
+scan:
+  # Scanners enabled by default. The container image scan in CI narrows this
+  # to vuln,secret so the merge gate stays focused on the shipped artifact.
+  scanners:
+    - vuln
+    - secret
+    - misconfig
+
+vulnerability:
+  # Keep reporting vulnerabilities that have no fixed version available yet.
+  ignore-unfixed: false

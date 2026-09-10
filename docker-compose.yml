@@ -9,25 +9,27 @@ services:
     networks:
       - runcodes-net
     environment:
+      TZ: America/Sao_Paulo
       RUNCODES_COMPILER_EXEC_DIR: /exec
       RUNCODES_COMPILER_EXEC_DIR_REMOTE: ${PWD}/exec
       # Parallelism tuning: in-flight commits = concurrency (default 8).
       # The real ceiling is how many compilation containers the Docker host
       # can run at once, not the CPU count.
       RUNCODES_COMPILER_CONCURRENCY: 8
-      # DB pool sizing (defaults shown): one pooled connection per
-      # in-flight commit is enough. When RUNCODES_DB_POOL_MAX_SIZE is
-      # unset it is derived as concurrency + 2; set it explicitly to win.
-      # RUNCODES_DB_POOL_MIN_SIZE: 1
-      # RUNCODES_DB_POOL_MAX_SIZE: 10
-      # RUNCODES_DB_POOL_TIMEOUT: 30
+  # DB pool sizing (defaults shown): one pooled connection per
+  # in-flight commit is enough. When RUNCODES_DB_POOL_MAX_SIZE is
+  # unset it is derived as concurrency + 2; set it explicitly to win.
+  # RUNCODES_DB_POOL_MIN_SIZE: 1
+  # RUNCODES_DB_POOL_MAX_SIZE: 10
+  # RUNCODES_DB_POOL_TIMEOUT: 30
 
   # PostgreSQL Database
   database:
     image: ghcr.io/runcodes-icmc/database:development
     restart: unless-stopped
     environment:
-      - POSTGRES_PASSWORD=secret_password
+      TZ: America/Sao_Paulo
+      POSTGRES_PASSWORD: secret_password
     ports:
       - "5432:5432"
     volumes:
