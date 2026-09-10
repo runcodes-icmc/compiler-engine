@@ -1,14 +1,6 @@
 FROM ghcr.io/astral-sh/uv:0.12.10 AS uv
 
-FROM python:3.14-slim-trixie AS runtime
-
-# Install dependencies
-RUN apt-get update &&\
-    apt-get install --no-install-recommends -y curl iptables libdevmapper-dev libpq-dev python3-dev &&\
-    apt-get clean &&\
-    rm -rf /var/lib/apt/lists/*
-
-FROM runtime AS build
+FROM python:3.14-alpine AS build
 
 # Install uv & setup install dir
 COPY --from=uv /uv /uvx /bin/
