@@ -30,8 +30,8 @@ scan:
     - misconfig
 
   skip-dirs:
-    - ".venv"
-    - ".cache/uv"
+    - "**/.venv"
+    - "**/.cache/uv"
 
 vulnerability:
   # Keep reporting vulnerabilities that have no fixed version available yet.
