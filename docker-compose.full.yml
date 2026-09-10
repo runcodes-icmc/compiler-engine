@@ -35,7 +35,7 @@ services:
 
   # PostgreSQL Database
   database:
-    image: ghcr.io/runcodes-icmc/database:latest-development
+    image: ghcr.io/runcodes-icmc/database:1.8-development
     restart: unless-stopped
     environment:
       - POSTGRES_PASSWORD=secret_password
@@ -82,7 +82,7 @@ services:
   ###########
 
   seaweed:
-    image: chrislusf/seaweedfs
+    image: chrislusf/seaweedfs:3.47
     ports:
       - 8333:8333
     command: server -s3 -volume.max=50 -dir="/data" -master.volumeSizeLimitMB=256 -ip=seaweed -ip.bind=0.0.0.0
