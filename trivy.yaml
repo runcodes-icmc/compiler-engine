@@ -29,6 +29,9 @@ scan:
     - secret
     - misconfig
 
+  skip-dirs:
+    - "**/.venv"
+
 vulnerability:
   # Keep reporting vulnerabilities that have no fixed version available yet.
   ignore-unfixed: false
