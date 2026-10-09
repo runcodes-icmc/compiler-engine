@@ -1,0 +1,41 @@
+FROM ghcr.io/astral-sh/uv:0.12.10 AS uv
+
+FROM python:3.14-alpine AS install
+
+RUN apk add --no-cache bzip2-dev \
+        coreutils \
+        gcc \
+        libc-dev \
+        libffi-dev \
+        libressl-dev \
+        linux-headers
+
+FROM install AS build
+
+# Install uv & setup install dir
+COPY --from=uv /uv /uvx /bin/
+
+WORKDIR /app
+
+# Load dependencies into a virtualenv
+ENV UV_COMPILE_BYTECODE=1 \
+    UV_LINK_MODE=copy
+
+COPY ./pyproject.toml /app/pyproject.toml
+COPY ./uv.lock /app/uv.lock
+
+RUN uv sync --frozen
+RUN uv add --no-cache-dir newrelic
+
+ENV PATH="/app/.venv/bin:$PATH"
+
+FROM build AS dist
+
+# Load source
+COPY ./src ./
+
+EXPOSE 8080
+
+# Entrypoint
+STOPSIGNAL SIGINT
+CMD ["newrelic-admin", "run-program", "python3", "main.py", "--config", "env" ]

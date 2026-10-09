@@ -7,6 +7,10 @@ on:
 
 jobs:
   docker-build:
+    strategy:
+      matrix:
+        variant: [base, newrelic]
+
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -18,7 +22,7 @@ jobs:
         with:
           # list of Docker images to use as base name for tags
           images: |
-            ghcr.io/${{ github.repository }}
+            ghcr.io/${{ github.repository }}-${{ matrix.variant }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -37,10 +41,11 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push ${{ matrix.variant }}
         uses: docker/build-push-action@v7
         with:
           context: .
+          file: ./Dockerfile-${{ matrix.variant }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
