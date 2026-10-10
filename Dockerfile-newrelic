@@ -35,8 +35,6 @@ ENV NEW_RELIC_CONFIG_FILE=/app/newrelic.ini
 # Load source
 COPY ./src ./
 
-EXPOSE 8000
-
 # Entrypoint
 STOPSIGNAL SIGINT
 ENTRYPOINT ["newrelic-admin", "run-program" ]
