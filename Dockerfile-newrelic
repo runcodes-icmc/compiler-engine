@@ -27,9 +27,10 @@ COPY ./uv.lock /app/uv.lock
 RUN uv sync --frozen
 RUN uv add --no-cache-dir newrelic
 
-ENV PATH="/app/.venv/bin:$PATH"
-
 FROM build AS dist
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV NEW_RELIC_CONFIG_FILE=/app/newrelic.ini
 
 # Load source
 COPY ./src ./
@@ -38,4 +39,5 @@ EXPOSE 8000
 
 # Entrypoint
 STOPSIGNAL SIGINT
-CMD ["newrelic-admin", "run-program", "python3", "main.py", "--config", "env" ]
+ENTRYPOINT ["newrelic-admin", "run-program" ]
+CMD ["python3", "main.py", "--config", "env" ]
