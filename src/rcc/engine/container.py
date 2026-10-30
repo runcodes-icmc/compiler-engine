@@ -27,6 +27,22 @@ if TYPE_CHECKING:
 # it never blocks process exit.
 CONTAINER_LOG_READER_JOIN_TIMEOUT = 5.0
 
+# Hardening applied to every submission container. None of the submitted
+# scripts legitimately need network access (compilation and test execution
+# are both local), and none need any Linux capability beyond what a plain
+# process needs to run - so both can be dropped unconditionally with no
+# effect on well-behaved submissions.
+#
+# Per-language memory/CPU/pids ceilings (compiler-monitor-oportunidades.md,
+# items S1/E4) are intentionally NOT added here yet: they need a limit
+# that is configurable per language (Java's JVM and MPI-based jobs expect
+# very different budgets than a plain C binary) and that work is tracked
+# separately so a single hardcoded number does not silently break a class
+# of submissions.
+CONTAINER_NETWORK_MODE = "none"
+CONTAINER_CAP_DROP = ["ALL"]
+CONTAINER_SECURITY_OPT = ["no-new-privileges"]
+
 
 class ContainerLogReader:
     """Bridge between docker-py's blocking log generator and asyncio.
@@ -173,6 +189,9 @@ async def run(
         detach=True,
         remove=False,
         volumes=volumes,
+        network_mode=CONTAINER_NETWORK_MODE,
+        cap_drop=CONTAINER_CAP_DROP,
+        security_opt=CONTAINER_SECURITY_OPT,
     )
 
     log_reader = ContainerLogReader(

@@ -47,10 +47,29 @@ def process_test_results(
     user_err_fname = os.path.join(base_dir, f"{test_case.id}.error")
     run_info_fname = os.path.join(base_dir, f"{test_case.id}.monitor_out")
     run_info = configparser.ConfigParser(allow_no_value=True)
-    with open(run_info_fname) as run_info_file:
-        run_info.read_file(it.chain(("[info]",), run_info_file))
+    try:
+        with open(run_info_fname) as run_info_file:
+            run_info.read_file(it.chain(("[info]",), run_info_file))
+        run_signal = run_info["info"]["signal"]
+        run_time = run_info["info"]["time"]
+    except (OSError, KeyError) as exc:
+        # The monitor binary did not run, or crashed before writing a
+        # well-formed `monitor_out` (missing file, or missing/malformed
+        # keys). This is a sandbox/infra failure, not a judgement on the
+        # submission: fail only this test case instead of letting the
+        # exception abort every other test case in the batch.
+        logger.error(
+            f"[{commit.id}] ({test_case.id}) Unreadable monitor output '{run_info_fname}': {exc}"
+        )
+        return TestCaseResult(
+            commit.id,
+            test_case.id,
+            -1,
+            TestCaseResult.STATUS_INCORRECT,
+            "-1",
+        )
     user_err_stat = os.stat(user_err_fname)
-    if len(run_info["info"]["signal"]) != 0 or user_err_stat.st_size != 0:
+    if len(run_signal) != 0 or user_err_stat.st_size != 0:
         test_status = TestCaseResult.STATUS_INCORRECT
     else:
         test_out_fname = os.path.join(base_dir, f"{test_case.id}.out")
@@ -67,9 +86,9 @@ def process_test_results(
     return TestCaseResult(
         commit.id,
         test_case.id,
-        run_info["info"]["time"],
+        run_time,
         test_status,
-        run_info["info"]["signal"],
+        run_signal,
     )
 
 
