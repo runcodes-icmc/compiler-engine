@@ -30,15 +30,15 @@ wheels = [
 
 [[package]]
 name = "boto3-stubs"
-version = "1.43.91"
+version = "1.44.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "botocore-stubs" },
     { name = "types-s3transfer" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/80/86/a13fdec6fe929e5560bb8adf2a45f437e2b47bfd908012a082069c78d40f/boto3_stubs-1.43.91.tar.gz", hash = "sha256:7e9b1743d558855b1a9c8f6fcfed1dc4dfb59a7843abc6e4c25513e86a1f3441", size = 104609, upload-time = "2026-09-09T20:20:56.192Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/2c/48/952db211ba7708ff68da7a68506af23bc085eceb4349fb87358aa1ff7449/boto3_stubs-1.44.3.tar.gz", hash = "sha256:acef615112ad17c90570e7d265d60d2bf39feb1cf948b66ad823ec3e986c7086", size = 105692, upload-time = "2026-11-13T21:36:08.378Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/97/d1/3608d39a39b199bf1abfd3d4a9d531757383cb6aff3d56009b3d60a11a40/boto3_stubs-1.43.91-py3-none-any.whl", hash = "sha256:d1f3bd3fe7dee9a5c4a06d7768c415f1bf972089fba3660d5ba49211a01571f2", size = 71510, upload-time = "2026-09-09T20:20:50.29Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/a3/6060c230b1ef3f9b18c24f85575d27f4b7074adb212d8c5b939f758f5710/boto3_stubs-1.44.3-py3-none-any.whl", hash = "sha256:7187b84a4b6e6dd9d09339a62788ab61a1d6c60d11f717a8e8f672feecf6ca71", size = 72071, upload-time = "2026-11-13T21:36:04.663Z" },
 ]
 
 [package.optional-dependencies]
@@ -193,7 +193,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "boto3", specifier = "~=1.43.89" },
-    { name = "boto3-stubs", extras = ["s3"], specifier = "~=1.43.89" },
+    { name = "boto3-stubs", extras = ["s3"], specifier = ">=1.43.89,<1.45.0" },
     { name = "docker", specifier = "~=7.2.0" },
     { name = "psycopg", extras = ["binary"], specifier = "~=3.3.5" },
     { name = "psycopg-pool", specifier = "~=3.3.1" },
@@ -239,11 +239,11 @@ wheels = [
 
 [[package]]
 name = "mypy-boto3-s3"
-version = "1.43.90"
+version = "1.44.6"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/a4/d0/777bd2635d2b215da3c9bd7ec29b33c32474e59cde694eb0131bee120408/mypy_boto3_s3-1.43.90.tar.gz", hash = "sha256:33933e82012022bb8e2f4b2628860d4331b15c1f0326fc79d5747ed01d06299b", size = 79392, upload-time = "2026-09-08T20:29:04.745Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/1b/34/2cfc7c13650830a2d6ab593218a09dbb7fed9bdcfca229f8206c3f1a52a8/mypy_boto3_s3-1.44.6.tar.gz", hash = "sha256:82149e61a10ba7e1cab3a2d2c6333370d81143bb93ee2ae2348c355e7df2b7ef", size = 79839, upload-time = "2026-11-19T00:42:58.138Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/1e/d666f9d3e84191f60de5bb59005c7fd254ba20a98e3c9edc535b115ebf26/mypy_boto3_s3-1.43.90-py3-none-any.whl", hash = "sha256:618c7792c6e5493822821927d476091ed6be0e5f01a30366c54419f7f764749e", size = 86721, upload-time = "2026-09-08T20:29:03.293Z" },
+    { url = "https://files.pythonhosted.org/packages/f9/ac/cf28701919efa40816ed4ea429a85b4877862a45db9b1d36089eeb0e03e5/mypy_boto3_s3-1.44.6-py3-none-any.whl", hash = "sha256:d36c7214d8f030d078176dc608666e4cdde0c9b9577ca99d723a7e3bc10e7428", size = 87230, upload-time = "2026-11-19T00:42:55.968Z" },
 ]
 
 [[package]]

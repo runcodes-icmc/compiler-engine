@@ -5,7 +5,7 @@ description = "The run.codes compiler engine"
 requires-python = ">=3.14"
 dependencies = [
     "boto3~=1.43.89",
-    "boto3-stubs[s3]~=1.43.89",
+    "boto3-stubs[s3]>=1.43.89,<1.45.0",
     "docker~=7.2.0",
     "psycopg[binary]~=3.3.5",
     "psycopg-pool~=3.3.1",
